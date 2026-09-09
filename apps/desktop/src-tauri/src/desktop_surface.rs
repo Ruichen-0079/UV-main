@@ -193,6 +193,9 @@ fn build_companion_window(
   .resizable(true)
   .build()?;
   restore_companion_window_geometry(app, &window);
+  // Re-assert after native construction/realization. Some Linux window
+  // managers ignore the builder hint until a live native window exists.
+  let _ = window.set_always_on_top(always_on_top);
   Ok(window)
 }
 
@@ -273,19 +276,6 @@ fn build_subtitle_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
   }
 
   Ok(window)
-}
-
-/// Toggle semantics: hidden → show (with surface focus policy), visible → hide.
-fn toggle_window_visible(
-  window: &tauri::WebviewWindow,
-  steal_focus: bool,
-) -> Result<(), String> {
-  let visible = window.is_visible().map_err(|error| error.to_string())?;
-  if visible {
-    window.hide().map_err(|error| error.to_string())
-  } else {
-    show_window(window, steal_focus)
-  }
 }
 
 fn show_window(window: &tauri::WebviewWindow, steal_focus: bool) -> Result<(), String> {
@@ -382,13 +372,28 @@ impl DesktopSurfaceManager {
   /// window when settings change. Best-effort, as before.
   pub(crate) fn apply_companion_always_on_top(app: &AppHandle, always_on_top: bool) {
     if let Some(window) = app.get_webview_window(SurfaceId::Companion.window_label()) {
-      let _ = window.set_always_on_top(always_on_top);
+      if let Err(error) = window.set_always_on_top(always_on_top) {
+        eprintln!("[yuvi-desktop] failed to apply Companion always-on-top: {error}");
+      }
     }
   }
 
   fn show(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
     let window = Self::ensure(app, surface).map_err(|error| error.to_string())?;
-    show_window(&window, surface.show_steals_focus())
+    if surface == SurfaceId::Companion {
+      // Re-assert before and after every show. GTK/Tao window managers may
+      // drop the keep-above hint across hide/show or native realization.
+      let policy = companion_always_on_top_from_state(app);
+      window
+        .set_always_on_top(policy)
+        .map_err(|error| error.to_string())?;
+      show_window(&window, surface.show_steals_focus())?;
+      window
+        .set_always_on_top(policy)
+        .map_err(|error| error.to_string())
+    } else {
+      show_window(&window, surface.show_steals_focus())
+    }
   }
 
   fn hide(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
@@ -400,7 +405,12 @@ impl DesktopSurfaceManager {
 
   fn toggle(app: &AppHandle, surface: SurfaceId) -> Result<(), String> {
     let window = Self::ensure(app, surface).map_err(|error| error.to_string())?;
-    toggle_window_visible(&window, surface.show_steals_focus())
+    let visible = window.is_visible().map_err(|error| error.to_string())?;
+    if visible {
+      window.hide().map_err(|error| error.to_string())
+    } else {
+      Self::show(app, surface)
+    }
   }
 }
 
