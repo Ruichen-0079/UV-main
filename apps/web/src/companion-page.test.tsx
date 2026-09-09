@@ -145,6 +145,7 @@ vi.mock("./tauri-window.js", () => ({
       (globalThis as { window?: { __TAURI_INTERNALS__?: unknown } }).window?.__TAURI_INTERNALS__
     ),
   preloadTauriWindowApi: async () => undefined,
+  startWindowDragging: async () => undefined,
   startWindowResizeDragging: async () => undefined
 }));
 
@@ -412,20 +413,28 @@ afterEach(() => {
   delete (globalThis as { window?: unknown }).window;
 });
 
-describe("CompanionPage Tauri chrome", () => {
-  it("renders without crashing and without Tauri chrome in a plain browser", () => {
+describe("CompanionPage product overlay", () => {
+  it("renders as an avatar-only surface without visible product chrome in a plain browser", () => {
     expect(() => renderToStaticMarkup(<CompanionPage />)).not.toThrow();
     const markup = renderToStaticMarkup(<CompanionPage />);
     expect(markup).toContain("Lumi avatar");
     expect(markup).not.toContain("data-tauri-drag-region");
     expect(markup).not.toContain("Resize window");
+    expect(markup).not.toContain("Full body");
+    expect(markup).not.toContain("Portrait");
+    expect(markup).not.toContain("companion window · open the main window to chat");
   });
 
-  it("renders the drag bar and resize handle only inside Tauri", () => {
+  it("keeps only an invisible hover resize affordance in Tauri", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     const markup = renderToStaticMarkup(<CompanionPage />);
-    expect(markup).toContain("data-tauri-drag-region");
+    expect(markup).not.toContain("data-tauri-drag-region");
+    expect(markup).toContain("data-yuvi-resize-handle");
     expect(markup).toContain('aria-label="Resize window"');
+    expect(markup).toContain("opacity-0");
+    expect(markup).toContain("hover:opacity-100");
+    expect(markup).not.toContain("Full body");
+    expect(markup).not.toContain("Portrait");
   });
 });
 
@@ -506,10 +515,18 @@ describe("CompanionPage generation interruption admission", () => {
       await emitBus(bus, { kind: "generation-state", requestId: "turn-a", state: "interrupted" });
 
       expect(queue.cancelCalls).toBe(0);
-      expect(readText(mounted.container)).toContain("speaking");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "active",
+        transition: "none"
+      });
 
       await emitPlayback(queue, "playbackEnded");
-      expect(readText(mounted.container)).toContain("idle");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "completed",
+        transition: "none"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();
@@ -526,7 +543,12 @@ describe("CompanionPage generation interruption admission", () => {
       await emitBus(bus, { kind: "generation-state", requestId: "turn-a", state: "interrupted" });
 
       expect(queue.cancelCalls).toBe(1);
-      expect(readText(mounted.container)).toContain("interrupted");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "cancelled",
+        activity: "idle",
+        speech: "cancelled",
+        transition: "interrupted"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();
@@ -546,10 +568,18 @@ describe("CompanionPage generation interruption admission", () => {
       await emitPlayback(queue, "playbackEnded", 0);
 
       expect(queue.cancelCalls).toBe(0);
-      expect(readText(mounted.container)).toContain("speaking");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "active",
+        transition: "none"
+      });
 
       await emitPlayback(queue, "playbackEnded", 1);
-      expect(readText(mounted.container)).toContain("idle");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "completed",
+        transition: "none"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();

@@ -4,7 +4,10 @@
 //! construction inputs. Application Quit and Runtime/Supervisor lifecycle stay
 //! outside this seam.
 
-use tauri::{AppHandle, Manager, PhysicalPosition};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Window};
 
 use crate::config;
 
@@ -93,6 +96,73 @@ fn companion_always_on_top_from_state(app: &AppHandle) -> bool {
   companion_always_on_top_or_default(configured)
 }
 
+
+const COMPANION_GEOMETRY_FILE: &str = "companion-window.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct CompanionWindowGeometry {
+  x: Option<i32>,
+  y: Option<i32>,
+  width: u32,
+  height: u32,
+}
+
+impl CompanionWindowGeometry {
+  fn is_valid(self) -> bool {
+    let position_valid = match (self.x, self.y) {
+      (Some(x), Some(y)) => {
+        (-100_000..=100_000).contains(&x) && (-100_000..=100_000).contains(&y)
+      }
+      (None, None) => true,
+      _ => false,
+    };
+    (320..=16_384).contains(&self.width)
+      && (480..=16_384).contains(&self.height)
+      && position_valid
+  }
+}
+
+fn companion_geometry_path(app: &AppHandle) -> Result<PathBuf, String> {
+  app
+    .path()
+    .app_config_dir()
+    .map(|dir| dir.join(COMPANION_GEOMETRY_FILE))
+    .map_err(|error| format!("app_config_dir unavailable: {error}"))
+}
+
+fn read_companion_window_geometry(path: &Path) -> Option<CompanionWindowGeometry> {
+  let text = fs::read_to_string(path).ok()?;
+  let geometry = serde_json::from_str::<CompanionWindowGeometry>(&text).ok()?;
+  geometry.is_valid().then_some(geometry)
+}
+
+fn write_companion_window_geometry(
+  path: &Path,
+  geometry: CompanionWindowGeometry,
+) -> Result<(), String> {
+  if !geometry.is_valid() {
+    return Err("companion window geometry is out of bounds".into());
+  }
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+  }
+  let bytes = serde_json::to_vec(&geometry).map_err(|error| error.to_string())?;
+  fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn restore_companion_window_geometry(app: &AppHandle, window: &tauri::WebviewWindow) {
+  let Some(geometry) = companion_geometry_path(app)
+    .ok()
+    .and_then(|path| read_companion_window_geometry(&path))
+  else {
+    return;
+  };
+  let _ = window.set_size(PhysicalSize::new(geometry.width, geometry.height));
+  if let (Some(x), Some(y)) = (geometry.x, geometry.y) {
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+  }
+}
+
 fn build_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
   tauri::WebviewWindowBuilder::new(
     app,
@@ -109,7 +179,7 @@ fn build_companion_window(
   app: &AppHandle,
   always_on_top: bool,
 ) -> tauri::Result<tauri::WebviewWindow> {
-  tauri::WebviewWindowBuilder::new(
+  let window = tauri::WebviewWindowBuilder::new(
     app,
     SurfaceId::Companion.window_label(),
     tauri::WebviewUrl::App(SurfaceId::Companion.window_url().into()),
@@ -121,7 +191,9 @@ fn build_companion_window(
   .transparent(true)
   .always_on_top(always_on_top)
   .resizable(true)
-  .build()
+  .build()?;
+  restore_companion_window_geometry(app, &window);
+  Ok(window)
 }
 
 fn build_webui_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -276,6 +348,36 @@ impl DesktopSurfaceManager {
     }
   }
 
+  /// Persist only Companion presentation geometry. Runtime/User settings remain
+  /// under their existing authorities; this file is desktop-surface state.
+  pub(crate) fn persist_companion_geometry(window: &Window) {
+    if window.label() != SurfaceId::Companion.window_label() {
+      return;
+    }
+    let Ok(size) = window.inner_size() else {
+      return;
+    };
+    let Ok(path) = companion_geometry_path(window.app_handle()) else {
+      return;
+    };
+    let previous = read_companion_window_geometry(&path);
+    let (x, y) = match window.outer_position() {
+      Ok(position) => (Some(position.x), Some(position.y)),
+      Err(_) => previous
+        .map(|value| (value.x, value.y))
+        .unwrap_or((None, None)),
+    };
+    let geometry = CompanionWindowGeometry {
+      x,
+      y,
+      width: size.width,
+      height: size.height,
+    };
+    if let Err(error) = write_companion_window_geometry(&path, geometry) {
+      eprintln!("[yuvi-desktop] companion geometry persistence skipped: {error}");
+    }
+  }
+
   /// Apply the configured Companion always-on-top presentation to the live
   /// window when settings change. Best-effort, as before.
   pub(crate) fn apply_companion_always_on_top(app: &AppHandle, always_on_top: bool) {
@@ -305,8 +407,10 @@ impl DesktopSurfaceManager {
 #[cfg(test)]
 mod tests {
   use super::{
-    companion_always_on_top_or_default, existing_or_create, subtitle_window_policy, SurfaceId,
+    companion_always_on_top_or_default, existing_or_create, read_companion_window_geometry,
+    subtitle_window_policy, write_companion_window_geometry, CompanionWindowGeometry, SurfaceId,
   };
+  use std::fs;
 
   #[test]
   fn existing_surface_is_reused_without_creation() {
@@ -337,6 +441,30 @@ mod tests {
     assert!(companion_always_on_top_or_default(None));
     assert!(companion_always_on_top_or_default(Some(true)));
     assert!(!companion_always_on_top_or_default(Some(false)));
+  }
+
+
+  #[test]
+  fn companion_geometry_roundtrips_and_rejects_invalid_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("companion-window.json");
+    let geometry = CompanionWindowGeometry {
+      x: Some(120),
+      y: Some(80),
+      width: 640,
+      height: 900,
+    };
+    write_companion_window_geometry(&path, geometry).expect("write geometry");
+    assert_eq!(read_companion_window_geometry(&path), Some(geometry));
+
+    fs::write(&path, r#"{"x":null,"y":null,"width":640,"height":900}"#).expect("write size-only");
+    assert_eq!(
+      read_companion_window_geometry(&path),
+      Some(CompanionWindowGeometry { x: None, y: None, width: 640, height: 900 })
+    );
+
+    fs::write(&path, r#"{"x":0,"y":null,"width":640,"height":900}"#).expect("write partial position");
+    assert_eq!(read_companion_window_geometry(&path), None);
   }
 
   /// Validated Linux desktop contract: Main, Companion, WebUI, and Subtitle

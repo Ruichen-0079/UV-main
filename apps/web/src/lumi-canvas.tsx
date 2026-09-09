@@ -35,7 +35,8 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     className?: string;
     onPresentationOutcome?: (report: EmbodiedPresentationOutcomeReport) => void;
     onModelLifecycle?: (state: LumiModelLifecycle) => void;
-    /** The companion window draws its own framing toggle outside the resize corner. */
+    /** Hide all non-canvas chrome for the transparent desktop companion surface. */
+    presentationOnly?: boolean;
     showFramingToggle?: boolean;
   },
   ref: Ref<LumiControllerHandle>
@@ -166,7 +167,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       }
       overlayFrame = requestAnimationFrame(tickOverlay);
     };
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && !props.presentationOnly) {
       overlayFrame = requestAnimationFrame(tickOverlay);
     }
 
@@ -198,7 +199,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       data-model-lifecycle={modelLifecycle}
       data-framing={framing}
     >
-      {(modelError || modelLifecycle !== "ready") && <div className="absolute left-2 top-10 z-10 rounded bg-black/70 p-2 text-sm text-white" role={modelError || modelLifecycle === "failed" ? "alert" : "status"}>
+      {!props.presentationOnly && (modelError || modelLifecycle !== "ready") && <div className="absolute left-2 top-10 z-10 rounded bg-black/70 p-2 text-sm text-white" role={modelError || modelLifecycle === "failed" ? "alert" : "status"}>
         {t(modelError || (modelLifecycle === "failed" ? "Live2D model failed to load. Check model assets and Cubism Core in Settings." : "Loading Live2D model…"))}
         {!modelError && modelLifecycle === "loading" && <progress aria-label={t("Live2D loading")} />}
       </div>}
@@ -212,7 +213,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
         style={{ display: "block", width: "100%", height: "100%" }}
         aria-hidden="true"
       />
-      {overlay && (
+      {!props.presentationOnly && overlay && (
         <div className="pointer-events-none absolute inset-0 z-10" aria-hidden="true">
           {/* Viewport safe margins */}
           <div
@@ -247,13 +248,13 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
           </div>
         </div>
       )}
-      <div
+      {!props.presentationOnly && <div
         className="pointer-events-none absolute bottom-2 left-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
         aria-live="polite"
       >
         {t(presenceLabel(state))}
-      </div>
-      {import.meta.env.DEV && (
+      </div>}
+      {import.meta.env.DEV && !props.presentationOnly && (
         <button
           type="button"
           className="absolute right-2 top-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
@@ -262,7 +263,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
           测试口型
         </button>
       )}
-      {props.showFramingToggle !== false && (
+      {!props.presentationOnly && props.showFramingToggle !== false && (
         <button
           type="button"
           className="absolute right-2 bottom-2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"

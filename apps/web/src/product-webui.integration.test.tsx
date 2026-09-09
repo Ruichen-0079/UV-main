@@ -24,6 +24,9 @@ vi.mock("./App.js", () => ({ App: () => <div>Developer dashboard</div> }));
 vi.mock("./tauri-window.js", () => ({ isTauriRuntime: () => true }));
 vi.mock("./locale-selector.js", () => ({ LocaleSelector: () => <div>Locale controls</div> }));
 vi.mock("./product-live2d-models.js", () => ({ ProductLive2DModels: () => <div>Live2D controls</div> }));
+vi.mock("./companion-appearance-settings.js", () => ({
+  CompanionAppearanceSettings: () => <div>Companion window controls</div>
+}));
 vi.mock("./product-memory-settings.js", () => ({ ProductMemorySettings: () => <div>Memory connection</div> }));
 vi.mock("./product-configuration.js", () => ({
   ProductConfigurationPanel: ({ sections }: { sections?: readonly string[] }) => (
@@ -79,6 +82,7 @@ describe("Product WebUI integration", () => {
 
     await act(async () => click(button(node, "Appearance")));
     expect(readText(node)).toContain("Locale controls");
+    expect(readText(node)).toContain("Companion window controls");
     expect(readText(node)).toContain("Live2D controls");
 
     await act(async () => click(button(node, "Advanced settings")));

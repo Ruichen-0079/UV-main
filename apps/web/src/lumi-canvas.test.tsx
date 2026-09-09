@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, createElement, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiControllerHandle } from "./lumi-live2d.js";
 import { createInitialCompanionPresence } from "./companion-presence.js";
@@ -197,6 +198,22 @@ afterEach(() => {
 });
 
 describe("LumiCanvas normalized projection input", () => {
+  it("presentationOnly emits the canvas without status or calibration chrome", () => {
+    const markup = renderToStaticMarkup(
+      createElement(LumiCanvas, {
+        requestedProjection: createInitialCompanionPresence(),
+        presentationOnly: true,
+        showFramingToggle: false
+      })
+    );
+    expect(markup).toContain("Lumi avatar");
+    expect(markup).not.toContain("Loading Live2D model");
+    expect(markup).not.toContain("测试口型");
+    expect(markup).not.toContain("显示全身");
+    expect(markup).not.toContain("显示半身");
+    expect(markup).not.toContain("待机");
+  });
+
   it("mounts the real controller path with epoch-less normalized listening", async () => {
     const dom = installFakeDom();
     let root!: Root;

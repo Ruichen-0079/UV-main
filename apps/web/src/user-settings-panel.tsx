@@ -333,12 +333,6 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
 
         <section className="settings-card">
           <h3>{t("Desktop")}</h3>
-          <label className="setting-checkbox">
-            <input
-              type="checkbox"
-              checked={form.companionAlwaysOnTop}
-              onChange={(e) => setField("companionAlwaysOnTop", e.target.checked)}
-            />{t("Companion always on top")}</label>
           <Field label={t("Connection mode")}>
             <select
               className="setting-input"

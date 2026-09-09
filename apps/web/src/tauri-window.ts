@@ -31,6 +31,12 @@ export async function startWindowResizeDragging(direction: TauriResizeDirection)
   await getCurrentWindow().startResizeDragging(direction);
 }
 
+export async function startWindowDragging(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().startDragging();
+}
+
 export type CompanionWindowAction =
   | "show_companion"
   | "hide_companion"
