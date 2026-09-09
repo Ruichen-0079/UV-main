@@ -17,7 +17,6 @@ import {
   createInterruptedResetScheduler,
   createInitialCompanionPresence,
   canInterruptGeneration,
-  getCompanionPresentationState,
   reduceCompanionPresence,
   type CompanionPresenceProjection
 } from "./companion-presence.js";
@@ -42,7 +41,6 @@ import {
 import {
   createBrowserSpeechPlayer,
   SpeechPlaybackQueue,
-  type SpeechQueueState,
   type SpeechPlaybackEvent
 } from "./speech-queue.js";
 import type { SpeechSegmentIdentity } from "./speech-identity.js";
@@ -76,8 +74,6 @@ export function CompanionPage(): JSX.Element {
   const [presence, setPresence] = useState<CompanionPresenceProjection>(() =>
     createInitialCompanionPresence()
   );
-  const [voiceStatus, setVoiceStatus] = useState<SpeechQueueState>("idle");
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const voiceEnabledRef = useRef(true);
   const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
     isTauriRuntime() ? null : { enabled: true, mode: "external" }
@@ -259,12 +255,10 @@ export function CompanionPage(): JSX.Element {
         reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
       );
       if (!voiceEnabledRef.current) {
-        setVoiceStatus("idle");
         speechBuffer.clear();
         return;
       }
       if (ttsConfigRef.current?.enabled !== true) {
-        setVoiceStatus("idle");
         speechBuffer.clear();
         return;
       }
@@ -283,7 +277,6 @@ export function CompanionPage(): JSX.Element {
           onState: (state) => {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
-            setVoiceStatus(state);
             updatePresence((current) =>
               reduceCompanionPresence(current, {
                 type: "queue",
@@ -312,7 +305,6 @@ export function CompanionPage(): JSX.Element {
           onError: () => {
             const session = sessionRef.current;
             if (!session || session.queue !== queue) return;
-            setVoiceStatus("error");
             updatePresence((current) =>
               reduceCompanionPresence(current, {
                 type: "queue",
@@ -374,7 +366,6 @@ export function CompanionPage(): JSX.Element {
       );
       const session = { requestId, queue, deduper: createSpeechSegmentDeduper() };
       sessionRef.current = session;
-      setVoiceStatus("synthesizing");
 
       // Flush any segments that arrived before the session existed. Buffer is
       // scoped to the active turn only — never replays old turns.
@@ -440,7 +431,6 @@ export function CompanionPage(): JSX.Element {
           // explicit disable stops speech; enable is a no-op for the queue.
           announcerRef.current?.markSynced();
           voiceEnabledRef.current = message.enabled;
-          setVoiceEnabled(message.enabled);
           recordSpeechLedger("sync", null, "voice-enabled", { enabled: message.enabled });
           if (!message.enabled) {
             publishSubtitleProjection({ kind: "clear" });
