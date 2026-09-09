@@ -177,6 +177,16 @@ pub fn run() {
       let env_overrides = config_service.supervisor_env().ok();
       app.manage(config::ConfigState::new(config_service));
 
+      // Attach-only Linux release mode must bind before WebViews load so the
+      // frontend can project the correct Runtime origin (Portable uses 16121).
+      // Owner modes retain their existing paint-first bootstrap below.
+      let attach_existing = supervisor::attach_existing_requested();
+      if attach_existing {
+        if let Err(error) = supervisor::attach_existing_supervisor(&app.handle()) {
+          eprintln!("[yuvi-desktop] supervisor attach skipped: {error}");
+        }
+      }
+
       #[cfg(unix)]
       if let Some(read_fd) = signal_read_fd {
         signal_exit::spawn_exit_reader(app.handle().clone(), read_fd);
@@ -192,16 +202,12 @@ pub fn run() {
       main_window.set_focus()?;
       tray::build_tray(&app.handle())?;
 
-      // Public Linux release launchers bind this presentation shell to the
-      // already-running unique Supervisor. Development/Windows keep the
-      // existing Tauri-owned bootstrap path unchanged.
-      let supervisor_result = if supervisor::attach_existing_requested() {
-        supervisor::attach_existing_supervisor(&app.handle())
-      } else {
-        supervisor::bootstrap_supervisor(&app.handle(), env_overrides)
-      };
-      if let Err(error) = supervisor_result {
-        eprintln!("[yuvi-desktop] supervisor bootstrap skipped: {error}");
+      // Development/Windows keep the existing Tauri-owned bootstrap path
+      // unchanged. Attach-only release mode was already bound before WebViews.
+      if !attach_existing {
+        if let Err(error) = supervisor::bootstrap_supervisor(&app.handle(), env_overrides) {
+          eprintln!("[yuvi-desktop] supervisor bootstrap skipped: {error}");
+        }
       }
 
       Ok(())
