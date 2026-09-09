@@ -27,6 +27,20 @@ import {
  * Companion must not mount this component.
  * Local reducer only — keystrokes never invoke Rust until Save.
  */
+function localizeUserSettingsSaveMessage(message: string): string {
+  if (message === "Settings saved.") return t("Settings saved.");
+  if (message === "Secret updated.") return t("Secret updated.");
+  if (message === "Settings saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.")
+    return t("Settings saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.");
+  if (message === "Secret saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.")
+    return t("Secret saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.");
+  const apply = message.match(/^Secret updated\. Applying changes to: (.+)\.$/u);
+  if (apply) return t("Secret updated. Applying changes to: {0}.", apply[1]);
+  const reload = message.match(/^Settings saved\. Services may reload: (.+)\.$/u);
+  if (reload) return t("Settings saved. Services may reload: {0}.", reload[1]);
+  return t(message);
+}
+
 export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
   onTtsSettings?: (settings: TtsSettingsProjection, revision: number) => void;
 }): JSX.Element | null {
@@ -181,7 +195,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
                 ? t("Saved (sync pending)")
                 : t("Saved")
             }
-            message={state.saveMessage}
+            message={localizeUserSettingsSaveMessage(state.saveMessage)}
           />
         )}
       </div>
