@@ -67,6 +67,7 @@ describe("Product WebUI integration", () => {
   it("separates daily-use concerns while keeping advanced and Developer reachable", async () => {
     const { ProductWebUI } = await import("./product-webui.js");
     const node = await mount(<ProductWebUI />);
+    expect(readText(node)).not.toContain("Configuration sections:");
 
     await act(async () => click(button(node, "Models")));
     expect(readText(node)).toContain("Configuration sections: models");
