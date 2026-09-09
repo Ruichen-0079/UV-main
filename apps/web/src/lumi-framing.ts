@@ -260,10 +260,7 @@ export function computePortraitHeadFit(input: LumiPortraitFitInput): LumiUniform
   // width rather than preserve UI-style horizontal padding. The calibrated
   // head box therefore targets the viewport plus a small fixed overscan.
   // Vertical crown/chin safety remains the hard upper bound.
-  const widthTarget = Math.max(
-    availableWidth * LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
-    viewportWidth + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2
-  );
+  const widthTarget = viewportWidth + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2;
   const scaleByWidth = widthTarget / headWidth;
   const scaleByHeight = availableHeight / headHeight;
   const uniformScale = Math.min(scaleByWidth, scaleByHeight);
