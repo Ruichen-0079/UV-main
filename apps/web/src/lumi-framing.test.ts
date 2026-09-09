@@ -8,6 +8,8 @@ import {
   isUniformPixelScale,
   LUMI_FULL_BODY_FIT,
   LUMI_PORTRAIT_HEAD_BOUNDS,
+  LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
+  LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX,
   LUMI_PORTRAIT_MARGINS,
   pixelsPerModelUnit,
   projectHeadBoundsToViewportPx,
@@ -56,7 +58,7 @@ describe("uniform scale contract", () => {
   });
 });
 
-describe("head-safe portrait framing", () => {
+describe("portrait framing", () => {
   const modelWidth = 2;
   const modelHeight = 2;
 
@@ -69,7 +71,7 @@ describe("head-safe portrait framing", () => {
     { w: 1200, h: 1600, name: "large" }
   ];
 
-  it("keeps the configured head bounds fully visible for common window shapes", () => {
+  it("keeps crown and chin vertically safe while allowing bounded horizontal cover", () => {
     for (const viewport of viewports) {
       const fit = computePortraitHeadFit({
         viewportWidth: viewport.w,
@@ -78,7 +80,15 @@ describe("head-safe portrait framing", () => {
         modelHeight,
         headBounds: LUMI_PORTRAIT_HEAD_BOUNDS
       });
-      expect(isHeadFullyVisible(fit)).toBe(true);
+      const rect = projectHeadBoundsToViewportPx(LUMI_PORTRAIT_HEAD_BOUNDS, fit);
+      expect(rect.top).toBeGreaterThanOrEqual(LUMI_PORTRAIT_MARGINS.top - 1.5);
+      expect(rect.bottom).toBeLessThanOrEqual(
+        viewport.h - LUMI_PORTRAIT_MARGINS.bottom + 1.5
+      );
+      expect(rect.left).toBeGreaterThanOrEqual(-LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX - 1.5);
+      expect(rect.right).toBeLessThanOrEqual(
+        viewport.w + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX + 1.5
+      );
       expect(fit.uniformScale).toBeGreaterThan(0);
       expect(fit.framing).toBe("half");
     }
@@ -113,7 +123,7 @@ describe("head-safe portrait framing", () => {
     expect(crown.y).toBeCloseTo(LUMI_PORTRAIT_MARGINS.top, 0);
   });
 
-  it("is width-limited on narrow-tall windows without stretching", () => {
+  it("is width-limited on narrow-tall windows with a bounded cover boost", () => {
     const fit = computePortraitHeadFit({
       viewportWidth: 280,
       viewportHeight: 720,
@@ -122,7 +132,11 @@ describe("head-safe portrait framing", () => {
     });
     const headW = LUMI_PORTRAIT_HEAD_BOUNDS.right - LUMI_PORTRAIT_HEAD_BOUNDS.left;
     const availW = 280 - LUMI_PORTRAIT_MARGINS.horizontal * 2;
-    expect(fit.uniformScale).toBeCloseTo(availW / headW, 5);
+    const expectedTarget = Math.min(
+      availW * LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
+      280 + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2
+    );
+    expect(fit.uniformScale).toBeCloseTo(expectedTarget / headW, 5);
     expect(isUniformPixelScale(fit)).toBe(true);
   });
 
@@ -162,24 +176,20 @@ describe("head-safe portrait framing", () => {
     expect(fit.uniformScale).toBeGreaterThan(full.uniformScale);
   });
 
-  it("reports projected head coordinates inside the safe viewport for every test size", () => {
-    for (const viewport of viewports) {
-      const fit = computePortraitHeadFit({
-        viewportWidth: viewport.w,
-        viewportHeight: viewport.h,
-        modelWidth,
-        modelHeight
-      });
-      const rect = projectHeadBoundsToViewportPx(LUMI_PORTRAIT_HEAD_BOUNDS, fit);
-      expect(rect.top).toBeGreaterThanOrEqual(LUMI_PORTRAIT_MARGINS.top - 1.5);
-      expect(rect.bottom).toBeLessThanOrEqual(
-        viewport.h - LUMI_PORTRAIT_MARGINS.bottom + 1.5
-      );
-      expect(rect.left).toBeGreaterThanOrEqual(LUMI_PORTRAIT_MARGINS.horizontal - 1.5);
-      expect(rect.right).toBeLessThanOrEqual(
-        viewport.w - LUMI_PORTRAIT_MARGINS.horizontal + 1.5
-      );
-    }
+  it("fills the default portrait width more aggressively than strict contain", () => {
+    const fit = computePortraitHeadFit({
+      viewportWidth: 480,
+      viewportHeight: 720,
+      modelWidth,
+      modelHeight
+    });
+    const rect = projectHeadBoundsToViewportPx(LUMI_PORTRAIT_HEAD_BOUNDS, fit);
+    const strictContainWidth = 480 - LUMI_PORTRAIT_MARGINS.horizontal * 2;
+    expect(rect.right - rect.left).toBeGreaterThan(strictContainWidth);
+    expect(rect.left).toBeGreaterThanOrEqual(-LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX - 1);
+    expect(rect.right).toBeLessThanOrEqual(
+      480 + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX + 1
+    );
   });
 });
 
