@@ -16,6 +16,7 @@ describe("UserSettingsPanel provider credentials", () => {
     expect(markup).not.toContain("Local STT model");
     expect(markup).not.toContain("Subject User ID");
     expect(markup).not.toContain("Persona ID");
+    expect(markup).not.toContain("Companion always on top");
     expect(markup).toContain("Identity scope is managed from People &amp; Memory");
     expect(markup).toContain("Desktop");
   });
