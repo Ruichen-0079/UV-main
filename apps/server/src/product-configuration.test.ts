@@ -72,6 +72,42 @@ function memoryOnDisk(context: AppContext, dir: string) {
   function events(): MemoryEvent[] { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return []; } }
   context.memory.getMemoryProvider = () => ({ retrieveRelevant: async () => ({ status: "empty", events: [], limited: false, source: "test" }), getEvent: async ({ id, scope }) => events().find(e => e.id === id && e.scope === scope) ?? null, writeEvent: async input => { const all = events(); const id = `event-${all.length}`; const event = { ...input, id, source: "test", sourceRecordId: id, metadata: input.metadata ?? {} }; writePrivateJson(file, [...all, event]); return { status: "written", eventId: id, event }; } });
 }
+
+it("product people reuse the current persona without exposing a second persona writer", async () => {
+  const run = await setup();
+  run.context.activeRuntimeEnv["MEMORY_PERSONA_ID"] = "alice";
+  run.context.memory.getMemoryProvider = () => undefined;
+  const response = await run.app.inject({
+    method: "POST",
+    url: "/product/people",
+    payload: { displayName: "Rui", notes: "My profile", primary: true }
+  });
+  expect(response.statusCode).toBe(200);
+  const body = response.json();
+  expect(body.profileEvidence).toBe("UNAVAILABLE");
+  expect(body.personId).toMatch(/^[a-f0-9-]{36}$/);
+  const saved = readProductSettings();
+  expect(saved?.primaryPersonId).toBe(body.personId);
+  expect(saved?.people[0]).toMatchObject({
+    id: body.personId,
+    displayName: "Rui",
+    personaId: "alice",
+    notes: "My profile"
+  });
+});
+
+it("product people never invent a persona when no current scope exists", async () => {
+  const run = await setup();
+  delete run.context.activeRuntimeEnv["MEMORY_PERSONA_ID"];
+  const response = await run.app.inject({
+    method: "POST",
+    url: "/product/people",
+    payload: { displayName: "Rui", notes: "", primary: true }
+  });
+  expect(response.statusCode).toBe(409);
+  expect(response.json().error).toContain("Current YUVI persona is not configured");
+  expect(readProductSettings()?.people ?? []).toEqual([]);
+});
 it("explicit three-utterance enrollment, Person binding restart, unknown sample review and unbinding use Runtime/Memory seams", async () => {
   let run = await setup(); const c = catalog(); c.providers.push({ id: "local-stt", displayName: "Local speech", baseUrl: "http://127.0.0.1:9876", adapter: "local-stt" }); c.models.push({ id: "speech", displayName: "Speech", modelId: "sensevoice", providerId: "local-stt", capabilities: ["stt"], contextWindow: null, temperature: 0, enabled: true }); c.routes.stt = ["speech"]; await run.save(c);
   const personResponse = await run.app.inject({ method: "POST", url: "/product/people", payload: { displayName: "Rui", personaId: "alice", notes: "My profile", primary: true } }); expect(personResponse.statusCode).toBe(200);
