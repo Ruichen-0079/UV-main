@@ -111,7 +111,7 @@ function runtimeHealthItem(
   }
 
   const serverStatus = input.health.server.status.trim().toLowerCase();
-  const gate = input.health.ok ? "passed" : "not passed";
+  const gate = t(input.health.ok ? "passed" : "not passed");
   if (serverStatus === "healthy") {
     return {
       id: "yuvi",
@@ -229,7 +229,7 @@ function voiceHealthItem(
   const allObservedUnavailable = observations.every((value) => value === "unavailable");
   const anyObservedUnavailable = observations.some((value) => value === "unavailable");
   const anyObservedDegraded = observations.some((value) => value === "degraded");
-  const detail = [`TTS: ${providerAxes(tts)}`, `STT: ${providerAxes(stt)}`].join(" · ");
+  const detail = [t("TTS: {0}", providerAxes(tts)), t("STT: {0}", providerAxes(stt))].join(" · ");
 
   if (allObservedUnavailable) {
     return { id: "voice", label: t("Voice"), tone: "bad", summary: "Unavailable", detail, source };
