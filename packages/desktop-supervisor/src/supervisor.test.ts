@@ -1565,3 +1565,217 @@ describe("DesktopSupervisor packaged Mem0 reconcile", () => {
     await supervisor.shutdown();
   });
 });
+
+describe("DesktopSupervisor bounded Local STT suspend", () => {
+  function localSttConfig(autostartLocalStt: boolean): SupervisorConfig {
+    return baseConfig({
+      localSttUrl: "http://127.0.0.1:9876",
+      autostartLocalStt,
+      localSttStart: {
+        file: "yuvi-local-stt",
+        args: [],
+        cwd: os.tmpdir(),
+        env: {},
+        commandMarker: "yuvi-local-stt"
+      }
+    });
+  }
+
+  function waitForReconcile(supervisor: DesktopSupervisor): Promise<void> {
+    return (
+      (supervisor as unknown as { configReconcileOp: Promise<void> | null }).configReconcileOp ??
+      Promise.resolve()
+    );
+  }
+
+  function mockLocalSttLifecycle(options: {
+    initiallyHealthy?: boolean;
+    readyOnSpawn?: boolean;
+  } = {}) {
+    let healthy = options.initiallyHealthy ?? false;
+    const readyOnSpawn = options.readyOnSpawn ?? true;
+    const children: Array<ReturnType<typeof fakeChild>> = [];
+    const commands = new Map<number, StartCommandSpec>();
+
+    vi.spyOn(health, "probeHttpHealth").mockImplementation(async (url) => {
+      if (url.includes("9876")) {
+        return healthy
+          ? { ok: true, statusCode: 200, protocolOk: true, message: "healthy", latencyMs: 1 }
+          : { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+      }
+      return { ok: false, statusCode: null, protocolOk: false, message: "down", latencyMs: 1 };
+    });
+    vi.spyOn(health, "probeTcp").mockResolvedValue({
+      ok: false,
+      statusCode: null,
+      protocolOk: false,
+      message: "closed",
+      latencyMs: 1
+    });
+
+    const spawn = vi.mocked(processWindows.spawnManagedProcess);
+    spawn.mockImplementation((command) => {
+      const child = fakeChild(61_000 + children.length);
+      commands.set(child.pid, command);
+      const originalKill = child.kill;
+      child.kill = () => {
+        healthy = false;
+        originalKill();
+      };
+      children.push(child);
+      if (readyOnSpawn) healthy = true;
+      return child as never;
+    });
+    vi.spyOn(processWindows, "inspectProcess").mockImplementation((pid) => {
+      const command = commands.get(pid);
+      return {
+        status: "resolved",
+        processId: pid,
+        info: {
+          processId: pid,
+          parentProcessId: 1,
+          commandLine: command
+            ? `${command.commandMarker} ${command.cwd}`
+            : `external-local-stt-${pid}`,
+          createdAtUtc: new Date()
+        }
+      };
+    });
+    vi.spyOn(processWindows, "isProcessAlive").mockImplementation(
+      (pid) => children.some((child) => child.pid === pid && !child.killed)
+    );
+    vi.spyOn(processWindows, "requestGracefulStop").mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "forceKillProcessTree").mockImplementation(() => undefined);
+
+    return {
+      spawn,
+      children,
+      setHealthy(value: boolean) {
+        healthy = value;
+      }
+    };
+  }
+
+  it("stops an owned STT, resists route autostart reapply, and explicit start clears suspend", async () => {
+    const processMock = mockLocalSttLifecycle();
+    const supervisor = createSupervisor(localSttConfig(true));
+
+    await supervisor.ensureService("local_stt");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().services.find((service) => service.id === "local_stt")).toMatchObject({
+      status: "healthy",
+      ownership: "owned"
+    });
+
+    const suspended = await supervisor.suspendLocalStt();
+    expect(suspended.outcome).toBe("STOPPED");
+    expect(suspended.reason).toBe("STOPPED");
+    expect(suspended.snapshot.localSttControl).toEqual({
+      manuallySuspended: true,
+      activeVoiceLeases: 0
+    });
+    expect(suspended.snapshot.services.find((service) => service.id === "local_stt")).toMatchObject({
+      status: "stopped",
+      ownership: "none"
+    });
+
+    await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_LOCAL_STT: "false" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    const reenabled = await supervisor.applyRuntimeConfig({
+      env: { YUVI_AUTOSTART_LOCAL_STT: "true" },
+      unsetEnv: []
+    });
+    await waitForReconcile(supervisor);
+    expect(reenabled.restartedServices).toContain("local_stt");
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().localSttControl?.manuallySuspended).toBe(true);
+    expect(supervisor.snapshot().services.find((service) => service.id === "local_stt")?.status).toBe(
+      "stopped"
+    );
+
+    await supervisor.ensureService("local_stt");
+    expect(processMock.spawn).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot().localSttControl?.manuallySuspended).toBe(false);
+    expect(supervisor.snapshot().services.find((service) => service.id === "local_stt")).toMatchObject({
+      status: "healthy",
+      ownership: "owned"
+    });
+  });
+
+  it("returns BUSY for an active voice lease and stops after the last lease releases", async () => {
+    const processMock = mockLocalSttLifecycle();
+    const supervisor = createSupervisor(localSttConfig(false));
+
+    const lease = await supervisor.acquireVoiceLease();
+    expect(processMock.spawn).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot().localSttControl?.activeVoiceLeases).toBe(1);
+
+    const suspended = await supervisor.suspendLocalStt();
+    expect(suspended).toMatchObject({
+      outcome: "BUSY",
+      reason: "LEASE_ACTIVE",
+      activeVoiceLeases: 1
+    });
+    expect(processMock.children[0]?.killed).toBe(false);
+    expect(supervisor.snapshot().localSttControl?.manuallySuspended).toBe(true);
+
+    await supervisor.releaseVoiceLease(lease.leaseId);
+    expect(processMock.children[0]?.killed).toBe(true);
+    expect(supervisor.snapshot().localSttControl).toEqual({
+      manuallySuspended: true,
+      activeVoiceLeases: 0
+    });
+    expect(supervisor.snapshot().services.find((service) => service.id === "local_stt")).toMatchObject({
+      status: "stopped",
+      ownership: "none"
+    });
+  });
+
+  it("returns RECONCILE_REQUIRED instead of killing a healthy external STT", async () => {
+    mockLocalSttLifecycle({ initiallyHealthy: true });
+    const supervisor = createSupervisor(
+      baseConfig({
+        localSttUrl: "http://127.0.0.1:9876",
+        localSttStart: null,
+        autostartLocalStt: false
+      })
+    );
+
+    const gracefulStop = vi.mocked(processWindows.requestGracefulStop);
+    const suspended = await supervisor.suspendLocalStt();
+    expect(suspended).toMatchObject({
+      outcome: "RECONCILE_REQUIRED",
+      reason: "EXTERNAL_PROCESS",
+      activeVoiceLeases: 0
+    });
+    expect(suspended.snapshot.services.find((service) => service.id === "local_stt")).toMatchObject({
+      status: "healthy",
+      ownership: "external"
+    });
+    expect(gracefulStop).not.toHaveBeenCalled();
+  });
+
+  it("interrupts an in-flight managed readiness wait so suspend stays bounded", async () => {
+    const processMock = mockLocalSttLifecycle({ readyOnSpawn: false });
+    const supervisor = createSupervisor(localSttConfig(true));
+
+    const starting = supervisor.ensureService("local_stt");
+    await vi.waitFor(() => expect(processMock.spawn).toHaveBeenCalledTimes(1), { timeout: 1_000 });
+
+    const startedAt = Date.now();
+    const suspended = await supervisor.suspendLocalStt();
+    const elapsedMs = Date.now() - startedAt;
+    await starting;
+
+    expect(elapsedMs).toBeLessThan(3_000);
+    expect(suspended.outcome).toBe("STOPPED");
+    expect(processMock.children[0]?.killed).toBe(true);
+    expect(supervisor.snapshot().services.find((service) => service.id === "local_stt")?.status).toBe(
+      "stopped"
+    );
+  });
+});
+

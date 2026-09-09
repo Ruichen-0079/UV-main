@@ -53,6 +53,7 @@ import {
 import type {
   ManagedServiceSpec,
   ProcessMetadata,
+  LocalSttSuspendResult,
   RuntimeConfigUpdate,
   RuntimeConfigUpdateResult,
   ServiceId,
@@ -190,6 +191,14 @@ export class DesktopSupervisor {
   private configReconcileOp: Promise<void> | null = null;
   private configGeneration = 0;
   private readonly lifecycleDiagnostics = process.env["YUVI_SUPERVISOR_DIAGNOSTICS"] === "1";
+  /**
+   * Session-scoped user intent: automatic route/config reconciliation must not
+   * keep local STT resident after an explicit suspend. Explicit start/restart
+   * clears it; explicit voice leases may temporarily override it.
+   */
+  private localSttManualSuspend = false;
+  /** Explicit voice operations currently waiting to acquire/start local STT. */
+  private localSttLeaseAcquisitions = 0;
   private readonly lifecycleStartedAt = process.hrtime.bigint();
   private lifecycleSequence = 0;
   private readonly hooks: SupervisorHooks;
@@ -391,6 +400,10 @@ export class DesktopSupervisor {
       shuttingDown: this.shuttingDown,
       services,
       updatedAt: new Date().toISOString(),
+      localSttControl: {
+        manuallySuspended: this.localSttManualSuspend,
+        activeVoiceLeases: this.voiceLeases.size
+      },
       postgres: postgresDiagnostics({
         mode: this.config.postgresMode ?? "external",
         layout: this.config.postgresLayout ?? null,
@@ -510,6 +523,7 @@ export class DesktopSupervisor {
   }
 
   async restartService(id: ServiceId): Promise<SupervisorSnapshot> {
+    if (id === "local_stt") this.localSttManualSuspend = false;
     if (this.shuttingDown) {
       const svc = this.services.get(id);
       if (svc) {
@@ -533,7 +547,94 @@ export class DesktopSupervisor {
     return this.snapshot();
   }
 
-  async stopService(id: ServiceId): Promise<SupervisorSnapshot> {
+  /**
+   * User-facing bounded Local STT suspend.
+   *
+   * The manual latch is published before waiting for config/service locks so an
+   * in-flight managed start can observe it and abort readiness promptly.
+   * Active voice leases are never interrupted: BUSY is returned immediately
+   * and the last lease release performs the deferred owned stop.
+   */
+  async suspendLocalStt(): Promise<LocalSttSuspendResult> {
+    if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
+    // Publish first: an in-flight Local STT readiness loop observes this even
+    // if another operation currently owns its service queue.
+    this.localSttManualSuspend = true;
+    const svc = this.require("local_stt");
+    const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
+    if (activeVoiceLeases > 0) {
+      svc.summary = "Suspend pending — active voice lease.";
+      svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
+      svc.lastError = null;
+      this.emit();
+      return {
+        outcome: "BUSY",
+        reason: "LEASE_ACTIVE",
+        activeVoiceLeases,
+        snapshot: this.snapshot()
+      };
+    }
+
+    const configGeneration = this.configGeneration;
+    await this.queue(svc, async () => {
+      await this.refreshService("local_stt");
+      if (svc.ownership === "owned" || svc.pid || svc.child) {
+        await this.stopOwned(svc);
+      }
+      // Re-probe after the bounded owned-stop pass. A surviving/foreign
+      // listener must become explicit RECONCILE_REQUIRED rather than a fake
+      // STOPPED result.
+      await this.refreshService("local_stt");
+    });
+
+    if (configGeneration !== this.configGeneration) {
+      svc.summary = "Local STT suspend needs reconciliation — configuration changed concurrently.";
+      svc.detail = "Re-read Supervisor status before retrying the operation.";
+      svc.lastError = null;
+      this.emit();
+      return {
+        outcome: "RECONCILE_REQUIRED",
+        reason: "CONFIG_CHANGED",
+        activeVoiceLeases: 0,
+        snapshot: this.snapshot()
+      };
+    }
+
+    if (svc.status === "stopped" && svc.ownership === "none") {
+      svc.summary = "Local STT suspended by user.";
+      svc.detail = null;
+      svc.lastError = null;
+      this.emit();
+      return {
+        outcome: "STOPPED",
+        reason: "STOPPED",
+        activeVoiceLeases: 0,
+        snapshot: this.snapshot()
+      };
+    }
+
+    const external =
+      svc.ownership === "external" ||
+      svc.status === "healthy" ||
+      svc.status === "degraded" ||
+      svc.status === "starting";
+    svc.summary = external
+      ? "Local STT suspend needs reconciliation — endpoint is still occupied."
+      : "Local STT suspend needs reconciliation — ownership could not be proven stopped.";
+    svc.detail = external
+      ? "A process still answers on the configured Local STT endpoint; Supervisor will not kill an unowned process."
+      : svc.detail;
+    svc.lastError = null;
+    this.emit();
+    return {
+      outcome: "RECONCILE_REQUIRED",
+      reason: external ? "EXTERNAL_PROCESS" : "OWNERSHIP_UNCERTAIN",
+      activeVoiceLeases: 0,
+      snapshot: this.snapshot()
+    };
+  }
+
+  private async stopServiceImmediate(id: ServiceId): Promise<SupervisorSnapshot> {
     const svc = this.require(id);
     await this.queue(svc, async () => {
       if (svc.ownership !== "owned") {
@@ -551,24 +652,48 @@ export class DesktopSupervisor {
     return this.snapshot();
   }
 
+  async stopService(id: ServiceId): Promise<SupervisorSnapshot> {
+    return this.stopServiceImmediate(id);
+  }
+
   private readonly voiceLeases = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** Bounded explicit product operation; no process ownership lives in Runtime. */
   async acquireVoiceLease(): Promise<{ leaseId: string; baseUrl: string }> {
-    return this.withConfigLock(async () => {
-      if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
-      const svc = this.require("local_stt");
-      await this.queue(svc, () => this.startManagedIfNeeded("local_stt"));
-      if (svc.ownership !== "owned" || svc.status !== "healthy") {
-        if (svc.ownership === "owned" && !this.config.autostartLocalStt && !this.voiceLeases.size) await this.stopService("local_stt");
-        throw new Error("Packaged speaker recognition is unavailable or its port is occupied.");
+    this.localSttLeaseAcquisitions += 1;
+    let acquisitionPending = true;
+    try {
+      return await this.withConfigLock(async () => {
+        if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
+        const svc = this.require("local_stt");
+        // An explicit enrollment/identify operation may wake a manually
+        // suspended service temporarily; release restores the suspended state.
+        await this.queue(svc, () => this.startManagedIfNeeded("local_stt", true));
+        if (svc.ownership !== "owned" || svc.status !== "healthy") {
+          if (
+            svc.ownership === "owned" &&
+            !this.config.autostartLocalStt &&
+            !this.voiceLeases.size
+          ) {
+            await this.stopServiceImmediate("local_stt");
+          }
+          throw new Error("Packaged speaker recognition is unavailable or its port is occupied.");
+        }
+        const leaseId = randomUUID();
+        const timer = setTimeout(() => { void this.releaseVoiceLease(leaseId).catch(() => {}); }, 180_000);
+        timer.unref();
+        // Convert pending acquisition -> active lease synchronously so suspend
+        // never double-counts one explicit voice operation.
+        this.localSttLeaseAcquisitions = Math.max(0, this.localSttLeaseAcquisitions - 1);
+        acquisitionPending = false;
+        this.voiceLeases.set(leaseId, timer);
+        return { leaseId, baseUrl: this.config.localSttUrl ?? "http://127.0.0.1:9876" };
+      });
+    } finally {
+      if (acquisitionPending) {
+        this.localSttLeaseAcquisitions = Math.max(0, this.localSttLeaseAcquisitions - 1);
       }
-      const leaseId = randomUUID();
-      const timer = setTimeout(() => { void this.releaseVoiceLease(leaseId).catch(() => {}); }, 180_000);
-      timer.unref();
-      this.voiceLeases.set(leaseId, timer);
-      return { leaseId, baseUrl: this.config.localSttUrl ?? "http://127.0.0.1:9876" };
-    });
+    }
   }
 
   async releaseVoiceLease(leaseId: string): Promise<void> {
@@ -577,11 +702,25 @@ export class DesktopSupervisor {
       if (!timer) return;
       clearTimeout(timer);
       this.voiceLeases.delete(leaseId);
-      if (!this.voiceLeases.size && !this.config.autostartLocalStt) await this.stopService("local_stt");
+      if (
+        !this.voiceLeases.size &&
+        (this.localSttManualSuspend || !this.config.autostartLocalStt)
+      ) {
+        await this.stopServiceImmediate("local_stt");
+        const svc = this.require("local_stt");
+        if (this.localSttManualSuspend && svc.ownership === "none") {
+          svc.status = "stopped";
+          svc.summary = "Local STT suspended by user.";
+          svc.detail = null;
+          svc.lastError = null;
+          this.emit();
+        }
+      }
     });
   }
 
   async ensureService(id: ServiceId): Promise<void> {
+    if (id === "local_stt") this.localSttManualSuspend = false;
     if (this.shuttingDown) return;
     await this.withConfigLock(async () => {
       const svc = this.require(id);
@@ -595,8 +734,12 @@ export class DesktopSupervisor {
    * Probe then spawn if needed. Must run inside a service queue (and config lock
    * when racing with applyRuntimeConfig). Does not re-enter queue.
    */
-  private async startManagedIfNeeded(id: ServiceId): Promise<void> {
+  private async startManagedIfNeeded(
+    id: ServiceId,
+    allowManualSuspended = false
+  ): Promise<void> {
     if (this.shuttingDown) return;
+    if (id === "local_stt" && this.localSttManualSuspend && !allowManualSuspended) return;
     const svc = this.require(id);
     this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
@@ -1138,6 +1281,14 @@ export class DesktopSupervisor {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (this.shuttingDown) return false;
+      if (
+        svc.spec.id === "local_stt" &&
+        this.localSttManualSuspend &&
+        this.voiceLeases.size === 0 &&
+        this.localSttLeaseAcquisitions === 0
+      ) {
+        return false;
+      }
       if (svc.spec.readinessCheck) {
         if (await svc.spec.readinessCheck()) return true;
       } else if (svc.spec.healthUrl) {
@@ -1811,6 +1962,38 @@ export class DesktopSupervisor {
     if (!svc || this.shuttingDown) return;
     await this.queue(svc, async () => {
       try {
+        if (this.localSttManualSuspend) {
+          const activeVoiceLeases = this.voiceLeases.size + this.localSttLeaseAcquisitions;
+          if (activeVoiceLeases > 0) {
+            svc.summary = "Suspend pending — active voice lease.";
+            svc.detail = `${activeVoiceLeases} explicit voice operation(s) still require Local STT.`;
+            svc.lastError = null;
+            this.emit();
+            return;
+          }
+          await this.refreshService("local_stt");
+          if (svc.ownership === "owned" || svc.pid || svc.child) {
+            await this.stopOwned(svc);
+            await this.refreshService("local_stt");
+          }
+          if (svc.status === "stopped" && svc.ownership === "none") {
+            svc.pendingExternal = false;
+            svc.summary = "Local STT suspended by user.";
+            svc.detail = null;
+            svc.lastError = null;
+          } else {
+            svc.summary =
+              "Local STT remains suspended, but endpoint ownership requires reconciliation.";
+            svc.detail =
+              svc.ownership === "external"
+                ? "A non-owned process is still answering on the configured Local STT endpoint."
+                : svc.detail;
+            svc.lastError = null;
+          }
+          this.emit();
+          return;
+        }
+
         if (action === "stop") {
           if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
           svc.pendingExternal = false;

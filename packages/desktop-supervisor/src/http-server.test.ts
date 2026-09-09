@@ -231,6 +231,44 @@ describe("control plane auth + loopback", () => {
     expect(shutdownSignals).toBe(1);
   });
 
+  it("POST local_stt stop preserves snapshot shape and reports the bounded suspend outcome", async () => {
+    const config = cfg();
+    const supervisor = new DesktopSupervisor(config);
+    vi.spyOn(supervisor, "suspendLocalStt").mockResolvedValue({
+      outcome: "BUSY",
+      reason: "LEASE_ACTIVE",
+      activeVoiceLeases: 1,
+      snapshot: supervisor.snapshot()
+    });
+    const { server, port } = await startSupervisorHttpServer(supervisor, {
+      host: "127.0.0.1",
+      controlToken: config.controlToken
+    });
+    servers.push(server);
+
+    const res = await request(
+      port,
+      "POST",
+      "/v1/services/local_stt/stop",
+      config.controlToken
+    );
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body) as {
+      instanceId: string;
+      services: unknown[];
+      operation: Record<string, unknown>;
+    };
+    expect(body.instanceId).toBe("inst-http");
+    expect(Array.isArray(body.services)).toBe(true);
+    expect(body.operation).toEqual({
+      serviceId: "local_stt",
+      action: "stop",
+      outcome: "BUSY",
+      reason: "LEASE_ACTIVE",
+      activeVoiceLeases: 1
+    });
+  });
+
   it("POST /v1/shutdown signals terminal shutdown even when the drain fails", async () => {
     const config = cfg();
     const supervisor = new DesktopSupervisor(config);
