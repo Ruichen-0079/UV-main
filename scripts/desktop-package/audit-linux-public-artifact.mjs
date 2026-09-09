@@ -67,6 +67,8 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
     "supervisor/THIRD_PARTY_NOTICES.supervisor.json",
     "web/dist/THIRD_PARTY_NOTICES.web.json",
     "web/dist/licenses/cubism-framework/LICENSE.md",
+    "desktop/yuvi-desktop",
+    "desktop/yuvi-desktop-launcher",
     "local-stt/runtime-inventory.json"
   ]) {
     if (!fs.existsSync(path.join(resolved, required)))

@@ -456,6 +456,12 @@ pub fn discover_repo_root() -> Result<PathBuf, String> {
 /// remains only for environments without any absolute home/data base; durable
 /// data there is best-effort and never relied on by the Linux product path.
 pub fn desktop_state_dir() -> PathBuf {
+  if let Ok(explicit) = std::env::var("YUVI_SUPERVISOR_STATE_ROOT") {
+    let trimmed = explicit.trim();
+    if !trimmed.is_empty() && Path::new(trimmed).is_absolute() {
+      return PathBuf::from(trimmed);
+    }
+  }
   #[cfg(target_os = "windows")]
   {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -509,6 +515,19 @@ mod tests {
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn explicit_supervisor_state_root_wins_on_unix() {
+        let _guard = lock_env();
+        std::env::set_var("YUVI_SUPERVISOR_STATE_ROOT", "/portable/supervisor");
+        std::env::set_var("XDG_DATA_HOME", "/xdg/data");
+        std::env::set_var("HOME", "/home/yuvi");
+        assert_eq!(desktop_state_dir(), PathBuf::from("/portable/supervisor"));
+        std::env::remove_var("YUVI_SUPERVISOR_STATE_ROOT");
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("HOME");
     }
 
     #[test]

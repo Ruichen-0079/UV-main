@@ -19,7 +19,8 @@ export type UiServiceId =
   | "ollama"
   | "postgres"
   | "tts_wrapper"
-  | "tts_upstream";
+  | "tts_upstream"
+  | "local_stt";
 
 export type UiServiceSnapshot = {
   id: UiServiceId;
@@ -66,7 +67,8 @@ const SERVICE_IDS: readonly UiServiceId[] = [
   "ollama",
   "postgres",
   "tts_wrapper",
-  "tts_upstream"
+  "tts_upstream",
+  "local_stt"
 ];
 
 const SERVICE_LIFECYCLES: readonly ServiceLifecycle[] = [

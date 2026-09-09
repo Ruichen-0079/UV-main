@@ -134,6 +134,9 @@ describe("service status reducer", () => {
     expect(
       normalizeUiServiceSnapshot({ id: "runtime", status: "healthy", ownership: "owned" })
     ).toMatchObject({ id: "runtime", status: "healthy", ownership: "owned" });
+    expect(
+      normalizeUiServiceSnapshot({ id: "local_stt", status: "healthy", ownership: "owned" })
+    ).toMatchObject({ id: "local_stt", status: "healthy", ownership: "owned" });
     expect(normalizeUiServiceSnapshot({ id: "unknown", status: "healthy" })).toBeNull();
     expect(
       normalizeUiServiceSnapshots([

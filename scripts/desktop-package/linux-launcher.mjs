@@ -12,6 +12,8 @@ const dirs = Object.fromEntries(['config', 'data', 'cache', 'tmp', 'supervisor',
 process.umask(0o077);
 for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const pointer = path.join(dirs.supervisor, 'active-instance.json');
+const desktopShell = path.join(root, 'desktop', 'yuvi-desktop');
+if (!fs.existsSync(desktopShell)) throw new Error('Portable desktop shell is missing.');
 async function control(route) {
   const active = JSON.parse(fs.readFileSync(pointer, 'utf8'));
   if (!path.resolve(active.endpointFile).startsWith(dirs.supervisor + path.sep)) throw new Error('No active instance at this portable location.');
@@ -42,7 +44,14 @@ try {
     const runtimePort = 16121, webPort = 15173, sttPort = 19876;
     for (const port of [runtimePort, webPort, sttPort]) await available(port);
     // Deliberately inherit no provider credentials, installed roots, or service commands.
+    // Only GUI session coordinates cross the portable isolation boundary.
+    const guiSessionEnv = Object.fromEntries(
+      ['DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY']
+        .filter(key => typeof process.env[key] === 'string' && process.env[key])
+        .map(key => [key, process.env[key]])
+    );
     const env = {
+      ...guiSessionEnv,
       PATH: '/usr/bin:/bin', HOME: dirs.home, LANG: process.env.LANG || 'C.UTF-8',
       XDG_CONFIG_HOME: dirs.config, XDG_DATA_HOME: dirs.data, XDG_CACHE_HOME: dirs.cache,
       TMPDIR: dirs.tmp, TMP: dirs.tmp, TEMP: dirs.tmp,
@@ -56,11 +65,23 @@ try {
     };
     const node = path.join(root, 'runtime', 'node');
     const supervisor = spawn(node, [path.join(root, 'supervisor', 'yuvi-desktop-supervisor.cjs'), '--mode', 'packaged', '--resource-root', root, '--state-root', dirs.data, '--runtime-manifest', path.join(root, 'runtime', 'runtime-manifest.json')], { cwd: state, env, stdio: 'inherit' });
-    let web, closing = false;
-    const stop = () => { if (closing) return; closing = true; supervisor.kill('SIGTERM'); web?.kill('SIGTERM'); };
+    const desktopEnv = { ...env, YUVI_DESKTOP_SUPERVISOR_BINDING: 'attach' };
+    let web, desktop, closing = false;
+    const stop = () => {
+      if (closing) return;
+      closing = true;
+      supervisor.kill('SIGTERM');
+      web?.kill('SIGTERM');
+      desktop?.kill('SIGTERM');
+    };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     supervisor.once('error', stop);
-    supervisor.once('exit', code => { closing = true; web?.kill('SIGTERM'); process.exitCode = code || 0; });
+    supervisor.once('exit', code => {
+      closing = true;
+      web?.kill('SIGTERM');
+      desktop?.kill('SIGTERM');
+      process.exitCode = code || 0;
+    });
     const deadline = Date.now() + 90_000;
     while (!closing) {
       try {
@@ -75,7 +96,9 @@ try {
     if (!closing) {
       web = spawn(node, [path.join(root, 'web', 'static-server.mjs'), '--root', path.join(root, 'web', 'dist'), '--port', String(webPort), '--runtime-port', String(runtimePort)], { cwd: state, env, stdio: 'inherit' });
       web.once('error', stop); web.once('exit', stop);
-      console.log(`YUVI: http://127.0.0.1:${webPort}/#/webui\nConfigure Chat in Product configuration. Run ./yuvi stop to shut down.`);
+      desktop = spawn(desktopShell, [], { cwd: state, env: desktopEnv, stdio: 'inherit' });
+      desktop.once('error', stop); desktop.once('exit', stop);
+      console.log(`YUVI desktop shell started. Browser fallback: http://127.0.0.1:${webPort}/#/webui\nRun ./yuvi stop to shut down.`);
     }
   } else throw new Error('Usage: ./yuvi [start|stop|status]');
 } catch (error) { console.error(error.message); process.exitCode = 1; }

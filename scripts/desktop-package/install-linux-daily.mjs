@@ -14,6 +14,8 @@ const webServer = path.join(resourceRoot, "web", "static-server.mjs");
 const webDist = path.join(resourceRoot, "web", "dist");
 const localStt = path.join(resourceRoot, "local-stt", "yuvi-local-stt");
 const localSttManifest = path.join(resourceRoot, "local-stt", "local-stt-manifest.json");
+const desktopShell = path.join(resourceRoot, "desktop", "yuvi-desktop");
+const desktopLauncher = path.join(resourceRoot, "desktop", "yuvi-desktop-launcher");
 for (const f of [
   nodeBin,
   supervisor,
@@ -21,7 +23,9 @@ for (const f of [
   webServer,
   webDist,
   localStt,
-  localSttManifest
+  localSttManifest,
+  desktopShell,
+  desktopLauncher
 ]) {
   if (!fs.existsSync(f)) throw new Error("Missing packaged resource: " + f);
 }
@@ -84,6 +88,8 @@ fs.mkdirSync(envDir, { recursive: true, mode: 0o700 });
 const stateRoot = path.join(xdg("XDG_DATA_HOME", ".local/share"), "YUVI/DesktopSupervisor");
 const quote = (v) =>
   '"' + v.replace(/\\\\/g, "\\\\\\\\").replace(/"/g, '\\\\"').replace(/%/g, "%%") + '"';
+const desktopExecArg = (v) =>
+  '"' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%") + '"';
 const pathEnv = ["/usr/local/bin", "/usr/bin", "/bin"].filter((p) => fs.existsSync(p)).join(":");
 const common = (wd) =>
   `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_MEM0=0\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
@@ -102,7 +108,7 @@ fs.writeFileSync(
 );
 fs.writeFileSync(
   path.join(applications, "yuvi-daily.desktop"),
-  `[Desktop Entry]\nType=Application\nName=YUVI Daily\nComment=Open the Linux Product WebUI\nExec=xdg-open http://127.0.0.1:5173/#/webui\nTerminal=false\nCategories=Utility;\n`,
+  `[Desktop Entry]\nType=Application\nName=YUVI\nComment=Open the YUVI desktop shell\nExec=${desktopExecArg(desktopLauncher)}\nTerminal=false\nCategories=Utility;\n`,
   { mode: 0o644 }
 );
 for (const args of [

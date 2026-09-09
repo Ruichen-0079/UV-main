@@ -1,4 +1,5 @@
 import { fetchUserSettings } from "./user-settings-client.js";
+import { getServiceStatus } from "./service-supervisor-client.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import { initializeLocale, setLocale, LOCALE_STORAGE_KEY } from "./locale.js";
 import { StrictMode } from "react";
@@ -8,7 +9,11 @@ import { ProductWebUI } from "./product-webui.js";
 import { MainPage } from "./main-page.js";
 import { CompanionPage } from "./companion-page.js";
 import { SubtitlePage } from "./subtitle-page.js";
-import { resolveDesktopSurface, type DesktopSurface } from "./desktop-runtime.js";
+import {
+  resolveDesktopSurface,
+  setDesktopRuntimeHttpOverride,
+  type DesktopSurface
+} from "./desktop-runtime.js";
 import "./styles.css";
 import "./product-ui.css";
 
@@ -39,6 +44,13 @@ const root = createRoot(rootElement);
 
 void resolveDesktopSurface().then(async (surface) => {
   if (isTauriRuntime()) {
+    try {
+      const snapshot = await getServiceStatus();
+      const runtimeUrl = snapshot?.services.find(service => service.id === "runtime")?.url;
+      if (runtimeUrl) setDesktopRuntimeHttpOverride(runtimeUrl);
+    } catch {
+      // Keep the installed 6121 fallback when the control plane is unavailable.
+    }
     try { const view = await fetchUserSettings(); setLocale(view.settings.app.language === "en" ? "en" : "zh-CN"); }
     catch { /* Settings surfaces expose load errors; the local UI remains usable. */ }
   }

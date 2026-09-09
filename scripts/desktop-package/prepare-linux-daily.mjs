@@ -125,6 +125,24 @@ export async function prepareLinuxDailyPackage() {
   const python = ensureLinuxLocalSttPython({
     venvDir: path.join(REPO_ROOT, "build", ".local-stt-venv")
   });
+  const desktopDir = path.join(out, "desktop");
+  ensureDir(desktopDir);
+  const configuredDesktopBinary = process.env.YUVI_LINUX_DESKTOP_BINARY?.trim();
+  const desktopBinarySource = configuredDesktopBinary
+    ? path.resolve(configuredDesktopBinary)
+    : path.join(REPO_ROOT, "apps", "desktop", "src-tauri", "target", "release", "yuvi-desktop");
+  assertFile(desktopBinarySource, "Linux Tauri desktop shell");
+  const desktopMagic = fs.readFileSync(desktopBinarySource).subarray(0, 4);
+  if (!desktopMagic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
+    throw new Error("Linux Tauri desktop shell must be an ELF executable");
+  fs.copyFileSync(desktopBinarySource, path.join(desktopDir, "yuvi-desktop"));
+  fs.chmodSync(path.join(desktopDir, "yuvi-desktop"), 0o755);
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts", "desktop-package", "yuvi-desktop-linux"),
+    path.join(desktopDir, "yuvi-desktop-launcher")
+  );
+  fs.chmodSync(path.join(desktopDir, "yuvi-desktop-launcher"), 0o755);
+
   const localSttDir = path.join(out, "local-stt");
   buildPackagedLocalStt({
     python,
@@ -149,6 +167,7 @@ export async function prepareLinuxDailyPackage() {
       "runtime.mjs",
       "bundled-node",
       "static-web",
+      "tauri-desktop-shell",
       "local-stt-sidecar",
       "local-stt-models",
       "local-stt-notices"
