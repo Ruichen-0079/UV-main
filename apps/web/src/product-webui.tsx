@@ -14,6 +14,7 @@ import { isTauriRuntime } from "./tauri-window.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
 import { CompanionAppearanceSettings } from "./companion-appearance-settings.js";
 import { SubtitleAppearanceSettings } from "./subtitle-appearance-settings.js";
+import { ProductFirstRunSetup } from "./product-first-run-setup.js";
 
 type ProductView = "home" | "models" | "people" | "appearance" | "advanced" | "developer";
 
@@ -125,6 +126,8 @@ export function ProductWebUI(): JSX.Element {
                 >{t("Open developer console")}</button>
               </div>
             </section>
+
+            <ProductFirstRunSetup onNavigate={(nextView) => setView(nextView)} />
 
             <ProductCompactHealth
               health={health.data}
