@@ -40,6 +40,7 @@ export function ProductConfigurationPanel(props: {
 } = {}): JSX.Element {
   const visibleSections = new Set(props.sections ?? allProductConfigurationSections);
   const show = (section: ProductConfigurationSection): boolean => visibleSections.has(section);
+  const showVoices = show("voices");
   const [state, setState] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Configuration | null>(null);
   const [proactive, setProactive] = useState({ threshold: .7, intervalMs: 60000 });
@@ -58,11 +59,11 @@ export function ProductConfigurationPanel(props: {
     setEnrollPerson(v => v || next.primaryPersonId || "");
     const primary = next.people.find(p => p.id === next.primaryPersonId);
     if (primary) setPerson({ ...primary, primary: true });
-    if (show("voices")) {
+    if (showVoices) {
       try { setVoices(await request<Voices>("/product/voices")); } catch { setNotice("Voice profiles are unavailable. Check local speaker recognition and Memory."); }
     }
   }
-  useEffect(() => { void refresh().catch(e => setNotice(String(e))); return () => { clearTimeout(timer.current); releaseMicrophoneCapture(capture.current); player.current?.pause(); if (sampleUrl.current) URL.revokeObjectURL(sampleUrl.current); }; }, []);
+  useEffect(() => { void refresh().catch(e => setNotice(String(e))); return () => { clearTimeout(timer.current); releaseMicrophoneCapture(capture.current); player.current?.pause(); if (sampleUrl.current) URL.revokeObjectURL(sampleUrl.current); }; }, [showVoices]);
   async function act(work: () => Promise<unknown>, message = "Saved. Effective state refreshed.") { setBusy(true); setNotice(""); try { const result = await work(); await refresh(); setNotice(result && typeof result === "object" && "message" in result ? String(result.message) : message); return true; } catch (e) { setNotice(e instanceof Error ? e.message : "Action failed."); return false; } finally { setBusy(false); } }
   async function save(configuration = draft) { if (!state || !configuration) return; return act(() => send("/product/configuration", { configuration, revision: state.revision, proactive }, "PUT")); }
   function changeRoute(cap: Capability, ids: string[]) { if (draft) setDraft({ ...draft, routes: { ...draft.routes, [cap]: ids } }); }
