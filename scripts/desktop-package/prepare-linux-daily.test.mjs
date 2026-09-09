@@ -24,6 +24,27 @@ test("linux daily prepare packages the Local STT sidecar instead of adapter sour
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
 });
 
+test("linux desktop launchers prefer XWayland for reliable topmost semantics", () => {
+  const installedLauncher = fs.readFileSync(
+    new URL("./yuvi-desktop-linux", import.meta.url),
+    "utf8"
+  );
+  assert.match(installedLauncher, /GDK_BACKEND/);
+  assert.match(installedLauncher, /WAYLAND_DISPLAY/);
+  assert.match(installedLauncher, /DISPLAY/);
+  assert.match(installedLauncher, /export GDK_BACKEND=x11/);
+  assert.match(installedLauncher, /-z "\\${GDK_BACKEND:-}"/);
+
+  const portableLauncher = fs.readFileSync(
+    new URL("./linux-launcher.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(portableLauncher, /guiSessionEnv\.WAYLAND_DISPLAY/);
+  assert.match(portableLauncher, /guiSessionEnv\.DISPLAY/);
+  assert.match(portableLauncher, /desktopEnv\.GDK_BACKEND = 'x11'/);
+  assert.match(portableLauncher, /process\.env\.GDK_BACKEND/);
+});
+
 test("linux daily installer leaves packaged Local STT stopped without a route", () => {
   const source = fs.readFileSync(new URL("./install-linux-daily.mjs", import.meta.url), "utf8");
   assert.match(source, /YUVI_AUTOSTART_LOCAL_STT=0/);
