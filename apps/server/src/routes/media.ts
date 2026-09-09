@@ -10,7 +10,6 @@ import {
   type STTOutput,
   type STTProvider
 } from "@companion/providers";
-import { createEvent } from "@companion/protocol";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";

@@ -14,6 +14,9 @@ SERVICE_ROOT = PACKAGING_DIR.parent
 ENTRY = SERVICE_ROOT / "server.py"
 
 sherpa_datas, sherpa_binaries, sherpa_hiddenimports = collect_all("sherpa_onnx")
+# Python modules are already in the executable archive; SDK headers are build-only.
+sherpa_datas = [(source, dest) for source, dest in sherpa_datas
+                if Path(source).suffix not in {".py", ".pyi", ".h", ".hpp"}]
 hiddenimports = [
     *sherpa_hiddenimports,
     "numpy",
@@ -30,10 +33,15 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pkg_resources", "setuptools", "backports"],
+    excludes=["pkg_resources", "setuptools", "backports", "readline"],
     noarchive=False,
     optimize=0,
 )
+# Never redistribute build-host GCC/zlib binaries (rolling distros may require
+# newer glibc or CPU ISA). Use the supported distro's standard runtime libraries.
+if os.name != "nt":
+    system_runtime = {"libstdc++.so.6", "libgcc_s.so.1", "libz.so.1"}
+    a.binaries = [entry for entry in a.binaries if Path(entry[0]).name not in system_runtime]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

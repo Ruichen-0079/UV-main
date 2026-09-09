@@ -12,7 +12,7 @@ coverage/
 .turbo/
 terminals/
 .cache/
-build/desktop/
+build/
 apps/desktop/src-tauri/generated/
 
 # Environment files

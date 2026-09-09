@@ -133,6 +133,15 @@ async function handle(
       const snap = await supervisor.refreshAll();
       return sendJson(res, 200, snap);
     }
+    if (method === "POST" && url.pathname === "/v1/voice/acquire") {
+      return sendJson(res, 200, await supervisor.acquireVoiceLease());
+    }
+    if (method === "POST" && url.pathname === "/v1/voice/release") {
+      const body = await readJsonBody(req) as { leaseId?: unknown };
+      if (typeof body.leaseId !== "string") return sendJson(res, 400, { error: "invalid_lease" });
+      await supervisor.releaseVoiceLease(body.leaseId);
+      return sendJson(res, 200, { ok: true });
+    }
     if (method === "POST" && url.pathname === "/v1/bootstrap") {
       const snap = await supervisor.bootstrap();
       return sendJson(res, 200, snap);

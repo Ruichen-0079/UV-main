@@ -228,6 +228,8 @@ def build() -> dict[str, Any]:
             os.environ.pop("YUVI_LOCAL_STT_SPEC_DIR", None)
         else:
             os.environ["YUVI_LOCAL_STT_SPEC_DIR"] = previous_spec_dir
+    from runtime_notices import stage_runtime_notices
+    stage_runtime_notices(layout.output_dir)
     manifest_path = _write_manifest(layout.output_dir)
     executable_path = layout.output_dir / packaged_manifest()["executable"]
     if executable_path.is_file() and sys.platform.startswith("linux"):

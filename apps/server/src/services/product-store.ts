@@ -11,7 +11,7 @@ export function readProductSettings(env = process.env): ProductSettings | null {
   catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw new Error("Product settings could not be read. Restore the local settings file."); }
 }
 export function writePrivateJson(path: string, value: unknown) {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
   renameSync(temp, path);

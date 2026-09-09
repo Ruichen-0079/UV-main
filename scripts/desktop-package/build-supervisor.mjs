@@ -1,3 +1,4 @@
+import { javascriptNotices } from "./javascript-notices.mjs";
 /**
  * Bundle desktop-supervisor + CLI into a single CommonJS file, then package
  * with @yao-pkg/pkg into a Windows x64 executable. A packaged build is never
@@ -76,7 +77,8 @@ function embeddedBuildInfoBanner(identity) {
 }
 
 async function bundleSupervisorWithIdentity(outfile, identity) {
-  await build({
+  const result = await build({
+    metafile: true,
     entryPoints: [path.join(REPO_ROOT, "scripts", "yuvi-desktop-supervisor.packaged.mjs")],
     bundle: true,
     platform: "node",
@@ -89,6 +91,7 @@ async function bundleSupervisorWithIdentity(outfile, identity) {
       js: `/* YUVI packaged Supervisor — do not edit */\n${embeddedBuildInfoBanner(identity)}`
     }
   });
+  fs.writeFileSync(path.join(path.dirname(outfile), "THIRD_PARTY_NOTICES.supervisor.json"), JSON.stringify(javascriptNotices(Object.keys(result.metafile.inputs)), null, 2));
   assertFile(outfile, "supervisor cjs bundle");
 }
 

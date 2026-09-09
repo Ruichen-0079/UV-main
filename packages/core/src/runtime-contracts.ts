@@ -227,6 +227,7 @@ export type RuntimeMemoryPort = {
     speakerId?: string;
   }): Promise<Memory[]>;
   /** Optional semantic provider used by the Runtime read path during migration. */
+  getVoiceBindingProvider?(): MemoryProvider | undefined;
   getMemoryProvider?(): MemoryProvider | undefined;
   retrieveRelevantMemoriesWithMetadata?(input: {
     text: string;

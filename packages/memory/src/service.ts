@@ -89,6 +89,7 @@ export type MemoryEmbeddingConfig = {
 export type MemoryServiceBackendConfig = {
   kind?: "legacy" | "mem0" | undefined;
   mem0?: MemoryBackend | undefined;
+  controllerEvidence?: MemoryProvider | undefined;
   searchTimeoutMs?: number | undefined;
   writeTimeoutMs?: number | undefined;
   ingestionPolicy?: Pick<MemoryIngestionPolicy, "build"> | undefined;
@@ -111,6 +112,7 @@ export class MemoryService {
   private readonly mem0SearchTimeoutMs: number;
   private readonly mem0WriteTimeoutMs: number;
   private readonly mem0Logger: MemoryServiceBackendConfig["logger"];
+  private readonly controllerEvidence: MemoryProvider | undefined;
   private readonly memoryProvider: MemoryProvider | undefined;
   private readonly memoryIngestionPolicy: Pick<MemoryIngestionPolicy, "build">;
 
@@ -133,6 +135,7 @@ export class MemoryService {
     this.mem0WriteTimeoutMs = backend?.writeTimeoutMs ?? MEM0_CHAT_WRITE_TIMEOUT_MS;
     this.mem0Logger = backend?.logger ?? embedding?.logger;
     this.memoryProvider = this.mem0Backend ? new Mem0MemoryProvider(this.mem0Backend) : undefined;
+    this.controllerEvidence = backend?.controllerEvidence;
     this.memoryIngestionPolicy = backend?.ingestionPolicy ?? new MemoryIngestionPolicy();
   }
 
@@ -146,6 +149,10 @@ export class MemoryService {
   }
 
   /** Runtime-facing semantic retrieval provider; legacy mode remains facade-only. */
+  getVoiceBindingProvider(): MemoryProvider | undefined {
+    return this.controllerEvidence;
+  }
+
   getMemoryProvider(): MemoryProvider | undefined {
     return this.memoryProvider;
   }
@@ -440,7 +447,7 @@ export class MemoryService {
       ...new Set([
         ...mergedRelationships.autoSupersedes,
         ...correctionRelationships.supersedes,
-        ...(hasCorrectionRequest(normalized) ? normalized.possibleSupersedes ?? [] : [])
+        ...(hasCorrectionRequest(normalized) ? (normalized.possibleSupersedes ?? []) : [])
       ])
     ];
     const storageCandidate: MemoryCandidate = {
@@ -2294,8 +2301,7 @@ function decideCandidateStorage(
   };
   if (isAssistantOnlyRestatement(candidate, extractionInput)) {
     const claim =
-      claimAttributionFromUnknown(candidate.claim) ??
-      deserializeClaimMetadata(candidate.metadata);
+      claimAttributionFromUnknown(candidate.claim) ?? deserializeClaimMetadata(candidate.metadata);
     if (claim?.provenanceClass !== "ASSISTANT_INFERENCE") {
       return { decision: "rejected", reason: "assistant-only-restatement" };
     }

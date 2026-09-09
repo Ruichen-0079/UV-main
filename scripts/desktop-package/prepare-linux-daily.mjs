@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT, MEMORY_MIGRATIONS_DIR } from "./constants.mjs";
+import { buildLinuxWeb } from "./build-linux-web.mjs";
 import { bundleSupervisorCjs } from "./build-supervisor.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import {
@@ -71,27 +72,18 @@ async function prepareLinuxNode(runtimeDir) {
   ensureDir(runtimeDir);
   const nodeDest = path.join(runtimeDir, "node");
   fs.copyFileSync(nodeSrc, nodeDest);
+  fs.copyFileSync(path.join(extractRoot, `node-v${NODE_VERSION}-linux-x64`, "LICENSE"), path.join(runtimeDir, "Node.LICENSE.txt"));
   fs.chmodSync(nodeDest, 0o755);
   return nodeDest;
 }
 function copyTreeFiltered(src, dest, skipNames) {
   ensureDir(dest);
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
-    if (skipNames.has(ent.name)) continue;
+    if (skipNames.has(ent.name) || /^\.env(?:\.|$)/.test(ent.name)) continue;
     const from = path.join(src, ent.name);
     const to = path.join(dest, ent.name);
     if (ent.isDirectory()) copyTreeFiltered(from, to, skipNames);
     else if (ent.isFile()) fs.copyFileSync(from, to);
-  }
-}
-function stripWeightFiles(base) {
-  if (!fs.existsSync(base)) return;
-  for (const f of fs.readdirSync(base, { recursive: true })) {
-    const fp = path.join(base, String(f));
-    try {
-      if (fs.statSync(fp).isFile() && /\.(onnx|wav|gguf|safetensors|ggml)$/i.test(fp))
-        fs.rmSync(fp);
-    } catch {}
   }
 }
 export async function prepareLinuxDailyPackage() {
@@ -108,6 +100,7 @@ export async function prepareLinuxDailyPackage() {
   const cjs = await bundleSupervisorCjs(supervisorDir);
   assertFile(cjs, "supervisor cjs");
   const runtime = await bundleRuntimeServer(runtimeDir);
+  fs.rmSync(runtime.metafilePath);
   const manifest = JSON.parse(fs.readFileSync(runtime.manifestPath, "utf8"));
   manifest.platform = "linux";
   manifest.arch = "x64";
@@ -119,6 +112,7 @@ export async function prepareLinuxDailyPackage() {
     if (name.endsWith(".sql"))
       fs.copyFileSync(path.join(MEMORY_MIGRATIONS_DIR, name), path.join(migDest, name));
   }
+  await buildLinuxWeb();
   const webDistSrc = path.join(REPO_ROOT, "apps", "web", "dist");
   assertDir(webDistSrc, "apps/web/dist");
   copyTreeFiltered(webDistSrc, path.join(webDir, "dist"), new Set());
@@ -126,22 +120,6 @@ export async function prepareLinuxDailyPackage() {
     path.join(REPO_ROOT, "scripts", "desktop-package", "linux-static-web-server.mjs"),
     path.join(webDir, "static-server.mjs")
   );
-  const skip = new Set([
-    ".venv",
-    "node_modules",
-    "__pycache__",
-    ".pytest_cache",
-    "hf-cache",
-    "models",
-    "packaging",
-    "tmp"
-  ]);
-  copyTreeFiltered(
-    path.join(REPO_ROOT, "services", "memory-mem0"),
-    path.join(out, "services", "memory-mem0"),
-    skip
-  );
-  stripWeightFiles(path.join(out, "services"));
   const modelDir = path.join(REPO_ROOT, "build", "desktop", "local-stt-models");
   downloadLocalSttModels({ dest: modelDir });
   const python = ensureLinuxLocalSttPython({
@@ -171,7 +149,6 @@ export async function prepareLinuxDailyPackage() {
       "runtime.mjs",
       "bundled-node",
       "static-web",
-      "adapter-sources",
       "local-stt-sidecar",
       "local-stt-models",
       "local-stt-notices"
@@ -184,6 +161,9 @@ export async function prepareLinuxDailyPackage() {
     path.join(REPO_ROOT, "scripts", "desktop-package", "install-linux-daily.mjs"),
     path.join(out, "install-linux-daily.mjs")
   );
+  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/yuvi-linux"), path.join(out, "yuvi"));
+  fs.chmodSync(path.join(out, "yuvi"), 0o755);
+  fs.copyFileSync(path.join(REPO_ROOT, "scripts/desktop-package/linux-launcher.mjs"), path.join(out, "launcher.mjs"));
   console.info("[linux-daily] prepared", out);
   return { outRoot: out, checkoutSha: sha };
 }

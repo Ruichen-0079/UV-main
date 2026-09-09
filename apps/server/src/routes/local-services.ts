@@ -1,3 +1,4 @@
+import { productVoiceProfiles } from "../services/packaged-voice.js";
 import { retainVoiceSample, voiceReviews, updateVoiceReview } from "../services/voice-review.js";
 import { isAbsolute } from "node:path";
 import { correctionFromP8CorrectionRecord, parseP8CorrectionRecord } from "@companion/p8";
@@ -40,7 +41,7 @@ export async function registerLocalServiceRoutes(
     const params = z.object({ id: z.string().min(1).max(160) }).safeParse(request.params);
     if (!parsed.success || !params.success)
       return reply.code(400).send({ error: "invalid_person_binding" });
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
       if (!(await profiles.list()).some((profile) => profile.voiceProfileId === params.data.id))
@@ -71,7 +72,7 @@ export async function registerLocalServiceRoutes(
   });
   app.get("/voice-profiles", async (request, reply) => {
     if (!requireLocalDashboardAccess(config, request, reply)) return;
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
       return { profiles: await profiles.list() };
@@ -85,7 +86,7 @@ export async function registerLocalServiceRoutes(
       .extend({ label: z.string().trim().min(1).max(100) })
       .safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_recording" });
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
       const profile = await profiles.enroll({ ...parsed.data, voiceProfileId: randomUUID() });
@@ -101,7 +102,7 @@ export async function registerLocalServiceRoutes(
     if (!requireLocalDashboardAccess(config, request, reply)) return;
     const parsed = audio.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_recording" });
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
       return await profiles.identify(parsed.data);
@@ -111,7 +112,7 @@ export async function registerLocalServiceRoutes(
   });
   app.delete<{ Params: { id: string } }>("/voice-profiles/:id", async (request, reply) => {
     if (!requireLocalDashboardAccess(config, request, reply)) return;
-    const profiles = context.providers.getSTTProvider().voiceProfiles;
+    const profiles = productVoiceProfiles(context);
     if (!profiles) return reply.code(409).send({ error: "voice_profiles_unavailable" });
     try {
       const removed = await context.runtime.removeVoiceProfileBinding(request.params.id);

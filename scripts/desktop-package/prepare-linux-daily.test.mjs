@@ -17,13 +17,13 @@ test("linux daily prepare packages the Local STT sidecar instead of adapter sour
     source.includes('copyTreeFiltered(path.join(REPO_ROOT, "services", "local-stt")'),
     false
   );
-  assert.match(source, /services", "memory-mem0"/);
+  assert.doesNotMatch(source, /services", "memory-mem0"/);
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
 });
 
-test("linux daily installer starts packaged Local STT without a Python command", () => {
+test("linux daily installer leaves packaged Local STT stopped without a route", () => {
   const source = fs.readFileSync(new URL("./install-linux-daily.mjs", import.meta.url), "utf8");
-  assert.match(source, /YUVI_AUTOSTART_LOCAL_STT=1/);
+  assert.match(source, /YUVI_AUTOSTART_LOCAL_STT=0/);
   assert.match(source, /local-stt", "yuvi-local-stt"/);
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
   assert.match(source, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
@@ -47,7 +47,7 @@ test("SenseVoice license files are present for redistribution", () => {
 });
 
 test(
-  "linux daily installer writes autostart for packaged Local STT",
+  "linux daily installer needs no env file and leaves Local STT nonresident",
   { skip: process.platform !== "linux" },
   () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-linux-stt-install-"));
@@ -75,7 +75,6 @@ test(
       );
       const envDir = path.join(home, "env");
       fs.mkdirSync(envDir);
-      fs.writeFileSync(path.join(envDir, ".env.local"), "X=1\n");
       const bin = path.join(home, "bin");
       fs.mkdirSync(bin);
       fs.writeFileSync(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -96,7 +95,7 @@ test(
         path.join(home, "config/systemd/user/yuvi-daily.service"),
         "utf8"
       );
-      assert.match(unit, /YUVI_AUTOSTART_LOCAL_STT=1/);
+      assert.match(unit, /YUVI_AUTOSTART_LOCAL_STT=0/);
       assert.match(unit, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
       assert.doesNotMatch(unit, /YUVI_LOCAL_STT_START_COMMAND/);
     } finally {
