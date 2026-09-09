@@ -37,9 +37,12 @@ vi.mock("./hooks/useAsyncData.js", () => ({
     }
   })
 }));
-it("renders speech readiness and reduced Memory capability without pretending TTS is selected", () => {
+it("keeps the legacy full configuration alias compatible without restoring onboarding clutter", () => {
   const html = renderToStaticMarkup(<ProductLocalServices />);
-  for (const text of ["Provider → Model → Capability Route", "Configure My Profile", "enroll your voice when available"]) expect(html).toContain(text);
+  expect(html).toContain("Provider → Model → Capability Route");
+  expect(html).toContain("Loading configuration");
+  expect(html).not.toContain("Configure My Profile");
+  expect(html).not.toContain("enroll your voice when available");
   expect(PRODUCT_ROUTING_DEFINITIONS.map((route) => route.capability)).toEqual([
     "chat",
     "reasoning",

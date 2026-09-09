@@ -95,10 +95,11 @@ describe("Product Models & Providers", () => {
     ).toBe("Connected · deepseek");
   });
 
-  it("renders a product page shell while current-main data is loading", () => {
+  it("keeps the Models wrapper scoped while current-main data is loading", () => {
     const markup = renderToStaticMarkup(<ProductModelsProviders />);
-    expect(markup).toContain("Provider → Model → Capability Route");
-    expect(markup).toContain("Loading configuration");
-    expect(markup).toContain("Add Provider");
+    expect(markup).toContain('aria-label="Product configuration"');
+    expect(markup).not.toContain("Provider → Model → Capability Route");
+    expect(markup).not.toContain("Add Provider");
+    expect(markup).not.toContain("My Profile");
   });
 });

@@ -405,4 +405,4 @@ function ProviderCard(props: {
   );
 }
 
-export function ProductModelsProviders(): JSX.Element { return <ProductConfigurationPanel />; }
+export function ProductModelsProviders(): JSX.Element { return <ProductConfigurationPanel sections={["models"]} />; }

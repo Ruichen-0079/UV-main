@@ -139,8 +139,10 @@ describe("Product compact multi-capability health", () => {
 
   it("keeps the Product IA split and Developer Dashboard entry reachable", () => {
     const markup = renderToStaticMarkup(<ProductWebUI />);
-    expect(markup).toContain("Models &amp; Providers");
-    expect(markup).toContain("AI Routing");
-    expect(markup).toContain("Developer");
+    for (const label of ["Models", "People &amp; Memory", "Appearance", "Advanced settings", "Developer"]) {
+      expect(markup).toContain(label);
+    }
+    expect(markup).not.toContain("Models &amp; Providers");
+    expect(markup).not.toContain(">AI Routing<");
   });
 });
