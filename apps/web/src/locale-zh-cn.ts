@@ -1,4 +1,6 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Delete voice": "删除声纹",
+  "Voice deleted.": "声纹已删除。",
   "Identity scope is managed from People & Memory. Legacy subject and persona values are retained for compatibility and are not edited here.": "身份范围由“人物与记忆”管理。旧版用户与角色标识仅为兼容保留，不在此编辑。",
   "My profile": "我的资料",
   "This is the person YUVI treats as you. Your name and notes become explicit long-term identity evidence when Memory is available.": "这是 YUVI 视为“你”的人物资料。Memory 可用时，姓名和备注会作为明确的长期身份信息保存。",
