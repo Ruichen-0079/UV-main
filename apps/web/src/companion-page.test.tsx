@@ -515,10 +515,18 @@ describe("CompanionPage generation interruption admission", () => {
       await emitBus(bus, { kind: "generation-state", requestId: "turn-a", state: "interrupted" });
 
       expect(queue.cancelCalls).toBe(0);
-      expect(readText(mounted.container)).toContain("speaking");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "active",
+        transition: "none"
+      });
 
       await emitPlayback(queue, "playbackEnded");
-      expect(readText(mounted.container)).toContain("idle");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "completed",
+        transition: "none"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();
@@ -535,7 +543,12 @@ describe("CompanionPage generation interruption admission", () => {
       await emitBus(bus, { kind: "generation-state", requestId: "turn-a", state: "interrupted" });
 
       expect(queue.cancelCalls).toBe(1);
-      expect(readText(mounted.container)).toContain("interrupted");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "cancelled",
+        activity: "idle",
+        speech: "cancelled",
+        transition: "interrupted"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();
@@ -555,10 +568,18 @@ describe("CompanionPage generation interruption admission", () => {
       await emitPlayback(queue, "playbackEnded", 0);
 
       expect(queue.cancelCalls).toBe(0);
-      expect(readText(mounted.container)).toContain("speaking");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "active",
+        transition: "none"
+      });
 
       await emitPlayback(queue, "playbackEnded", 1);
-      expect(readText(mounted.container)).toContain("idle");
+      expect(mockState.projections.at(-1)).toMatchObject({
+        lifecycle: "generation-complete",
+        speech: "completed",
+        transition: "none"
+      });
     } finally {
       await act(async () => mounted.root.unmount());
       mounted.restore();
