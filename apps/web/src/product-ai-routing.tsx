@@ -583,4 +583,4 @@ export function ProductRoutingCard(props: ProductRoutingCardProps): JSX.Element 
   );
 }
 
-export function ProductAIRouting(): JSX.Element { return <ProductConfigurationPanel />; }
+export function ProductAIRouting(): JSX.Element { return <ProductConfigurationPanel sections={["routes"]} />; }
