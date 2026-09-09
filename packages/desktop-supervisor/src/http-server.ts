@@ -178,6 +178,19 @@ async function handle(
         return sendJson(res, 200, await supervisor.restartService(id));
       }
       if (action === "stop") {
+        if (id === "local_stt") {
+          const result = await supervisor.suspendLocalStt();
+          return sendJson(res, 200, {
+            ...result.snapshot,
+            operation: {
+              serviceId: "local_stt",
+              action: "stop",
+              outcome: result.outcome,
+              reason: result.reason,
+              activeVoiceLeases: result.activeVoiceLeases
+            }
+          });
+        }
         return sendJson(res, 200, await supervisor.stopService(id));
       }
       if (action === "start") {
