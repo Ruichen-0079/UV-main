@@ -15,7 +15,9 @@ and unrelated writes fail closed. Tests cover durable IDs across Mem0 on/off.
 ## Debian build provenance
 
 The build root is Debian 12, glibc 2.36, with CPython 3.11.16 from the official
-Python Bookworm image. Runtime CPython native inputs were byte-compared with a
+Python Bookworm image, manifest
+`sha256:b1add8a6f2aca6bcfcf0b9c9b522352f7ce0d62a3d556a2f2f32511aa0cca250`.
+Runtime CPython native inputs were byte-compared with a
 separate clean extraction of that image. Previously copied host site-packages
 are excluded by a fresh venv (`include-system-site-packages = false`).
 
@@ -67,3 +69,20 @@ assets are excluded. The official provisioning seam remains.
 Archive creation writes `release-sbom.json`, normalizes tar metadata, uses one
 compression thread, and emits `SHA256SUMS`. Packaging completion and final merged
 source identity must be recorded only after the remaining acceptance/CI gates.
+
+## Installer and portable acceptance
+
+Candidate `bfe03c0` passed real systemd user-manager installation in an isolated
+network/filesystem namespace, with system Python masked and no checkout mounted.
+First-run, public-fixture enrollment, reinstall, restart match, uninstall,
+CONFIG/DATA retention and zero Runtime/WebUI/STT listeners all passed.
+
+The portable archive passed extract → run → rename → run → move → run with
+spaces and Chinese characters, read-only package mounts and external DATA.
+Each run included real voice identity checks. Deleting the extracted package
+preserved Person, VoiceProfile and binding evidence. Portable execution created
+no systemd units or desktop entries. The existing installed YUVI was unaffected.
+
+The final installer additionally removes retained managed versions on uninstall;
+unrecognized directories are not removed. Source/privacy auditing rejects source
+files, environment files, biometric state and escaping resource symlinks.

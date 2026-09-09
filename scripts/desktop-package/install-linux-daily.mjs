@@ -61,7 +61,19 @@ if (process.argv.includes("--uninstall")) {
     const base = path.dirname(path.dirname(resourceRoot));
     const current = path.join(base, "current");
     if (fs.existsSync(current) && fs.realpathSync(current) === resourceRoot) fs.unlinkSync(current);
-    fs.rmSync(resourceRoot, { recursive: true });
+    // Remove every version installed by this installer, including retained updates.
+    for (const name of fs.readdirSync(path.join(base, "releases"))) {
+      if (!/^[a-f0-9]{40}$/.test(name)) continue;
+      const release = path.join(base, "releases", name);
+      if (!fs.lstatSync(release).isDirectory()) continue;
+      const receipt = path.join(release, "managed-install.json");
+      if (
+        fs.existsSync(receipt) &&
+        JSON.parse(fs.readFileSync(receipt, "utf8")).checkoutSha === name
+      ) {
+        fs.rmSync(release, { recursive: true });
+      }
+    }
   }
   console.log(
     "YUVI integration and managed resources removed. Durable DATA and CONFIG are preserved."

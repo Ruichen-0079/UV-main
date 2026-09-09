@@ -46,7 +46,7 @@ execFileSync("tar", [
   "--numeric-owner",
   "--mode=u+rwX,go+rX,go-w",
   "--format=gnu",
-  "--use-compress-program=zstd -19 -T1",
+  "--use-compress-program=zstd -10 -T1",
   "-cf",
   portable,
   "-C",
