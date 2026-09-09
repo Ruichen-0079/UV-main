@@ -169,7 +169,7 @@ describe("durable Live2D models", () => {
     const installed = state.models.find((model: any) => model.id === state.activeId);
     expect(installed?.name).toBe("Lumi VTS");
     expect(installed?.model).toBe("Lumi/Lumi.model3.json");
-    expect((await app.inject(installed.url)).statusCode).toBe(200);
+    expect((await app.inject(installed.url.slice(4))).statusCode).toBe(200);
     expect(
       (
         await app.inject(
