@@ -8,7 +8,6 @@ import {
   isUniformPixelScale,
   LUMI_FULL_BODY_FIT,
   LUMI_PORTRAIT_HEAD_BOUNDS,
-  LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
   LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX,
   LUMI_PORTRAIT_MARGINS,
   pixelsPerModelUnit,
@@ -123,7 +122,7 @@ describe("portrait framing", () => {
     expect(crown.y).toBeCloseTo(LUMI_PORTRAIT_MARGINS.top, 0);
   });
 
-  it("is width-limited on narrow-tall windows with a bounded cover boost", () => {
+  it("is width-limited on narrow-tall windows and covers the transparent viewport", () => {
     const fit = computePortraitHeadFit({
       viewportWidth: 280,
       viewportHeight: 720,
@@ -131,12 +130,11 @@ describe("portrait framing", () => {
       modelHeight
     });
     const headW = LUMI_PORTRAIT_HEAD_BOUNDS.right - LUMI_PORTRAIT_HEAD_BOUNDS.left;
-    const availW = 280 - LUMI_PORTRAIT_MARGINS.horizontal * 2;
-    const expectedTarget = Math.min(
-      availW * LUMI_PORTRAIT_HORIZONTAL_SCALE_BOOST,
-      280 + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2
-    );
+    const expectedTarget = 280 + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX * 2;
     expect(fit.uniformScale).toBeCloseTo(expectedTarget / headW, 5);
+    const rect = projectHeadBoundsToViewportPx(LUMI_PORTRAIT_HEAD_BOUNDS, fit);
+    expect(rect.left).toBeCloseTo(-LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX, 1);
+    expect(rect.right).toBeCloseTo(280 + LUMI_PORTRAIT_MAX_HORIZONTAL_BLEED_PX, 1);
     expect(isUniformPixelScale(fit)).toBe(true);
   });
 
