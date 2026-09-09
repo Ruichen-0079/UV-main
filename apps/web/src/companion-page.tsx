@@ -33,7 +33,6 @@ import {
   type SpeechPlaybackCorrelationState
 } from "./speech-playback-correlation.js";
 import { LumiCanvas } from "./lumi-canvas.js";
-import type { LumiFraming } from "./lumi-cubism-model.js";
 import type { LumiControllerHandle, LumiModelLifecycle } from "./lumi-live2d.js";
 import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
 import {
@@ -50,6 +49,7 @@ import type { SpeechSegmentIdentity } from "./speech-identity.js";
 import {
   isTauriRuntime,
   preloadTauriWindowApi,
+  startWindowDragging,
   startWindowResizeDragging
 } from "./tauri-window.js";
 
@@ -86,7 +86,6 @@ export function CompanionPage(): JSX.Element {
   const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
   const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
   const audioCapability = useMemo(() => detectBrowserAudioCapability(), []);
-  const [framing, setFraming] = useState<LumiFraming>("half");
   const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
   const activeEpochRef = useRef<string | null>(null);
   const speechStoppedEpochRef = useRef<string | null>(null);
@@ -591,54 +590,33 @@ export function CompanionPage(): JSX.Element {
     }
   }, [presence.transition, presence.epoch]);
 
+  const tauri = isTauriRuntime();
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
+    <div
+      className="relative h-screen w-screen overflow-hidden bg-transparent text-white touch-none select-none"
+      onPointerDown={(event) => {
+        if (!tauri || event.button !== 0) return;
+        const target = event.target as HTMLElement;
+        if (target.closest?.("[data-yuvi-resize-handle]")) return;
+        void startWindowDragging();
+      }}
+    >
       <LumiCanvas
         ref={lumiRef}
         requestedProjection={presence}
         onModelLifecycle={setModelLifecycle}
         onPresentationOutcome={submitPresentationOutcome}
         className="h-full w-full rounded-none"
+        presentationOnly
         showFramingToggle={false}
       />
-      {/* Drag region above the canvas so WebView native drag is not stolen by WebGL. */}
-      {isTauriRuntime() && (
-        <div
-          data-tauri-drag-region
-          className="absolute inset-x-0 top-0 z-30 h-7 cursor-grab touch-none select-none border-b border-white/5 bg-white/5"
-          aria-label={t("Drag window")}
-          title={t("Drag window")}
-        >
-          <div className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/25" />
-        </div>
-      )}
-      <div
-        className="pointer-events-none absolute left-2 top-9 z-20 rounded bg-black/40 px-2 py-1 text-xs"
-        aria-live="polite"
-      >
-        {t(presenceLabel(presence))} · {t(voiceStatusLabel(voiceStatus))}{t("· voice")}{" "}
-        {voiceEnabled ? t("on") : t("off")}
-      </div>
-      <button
-        type="button"
-        className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded bg-ink-900/70 px-2 py-1 text-xs text-white"
-        aria-pressed={framing === "full"}
-        onClick={() =>
-          setFraming((current) => {
-            const next = current === "half" ? "full" : "half";
-            lumiRef.current?.setFraming(next);
-            return next;
-          })
-        }
-      >
-        {/* Label is the action target (not the current mode). Default is portrait/half. */}
-        {framing === "half" ? t("Full body") : t("Portrait")}
-      </button>
-      {isTauriRuntime() && (
+      {tauri && (
         <button
           type="button"
+          data-yuvi-resize-handle
           aria-label={t("Resize window")}
-          className="absolute bottom-0 right-0 z-20 flex h-5 w-5 cursor-se-resize items-end justify-end rounded-tl-md bg-white/10 p-0.5 text-white/70 hover:bg-white/20 hover:text-white"
+          className="absolute bottom-0 right-0 z-20 flex h-6 w-6 cursor-se-resize items-end justify-end p-0.5 text-white/70 opacity-0 transition-opacity hover:opacity-100 focus-visible:opacity-100"
           onPointerDown={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -656,40 +634,6 @@ export function CompanionPage(): JSX.Element {
           </svg>
         </button>
       )}
-      {import.meta.env.DEV && (
-        <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/40 px-2 py-1 text-xs">{t("companion window · open the main window to chat")}</div>
-      )}
     </div>
   );
-}
-
-function presenceLabel(projection: CompanionPresenceProjection): string {
-  const state = getCompanionPresentationState(projection);
-  switch (state) {
-    case "thinking":
-      return "thinking";
-    case "listening":
-      return "listening";
-    case "speaking":
-      return "speaking";
-    case "interrupted":
-      return "interrupted";
-    case "idle":
-      return "idle";
-  }
-}
-
-function voiceStatusLabel(state: SpeechQueueState): string {
-  switch (state) {
-    case "synthesizing":
-      return "synthesizing";
-    case "playing":
-      return "playing";
-    case "stopped":
-      return "stopped";
-    case "error":
-      return "error";
-    case "idle":
-      return "idle";
-  }
 }
