@@ -59,7 +59,12 @@ export type LocalSttSuspendOutcome = "STOPPED" | "BUSY" | "RECONCILE_REQUIRED";
 
 export type LocalSttSuspendResult = {
   outcome: LocalSttSuspendOutcome;
-  reason: "STOPPED" | "LEASE_ACTIVE" | "EXTERNAL_PROCESS" | "OWNERSHIP_UNCERTAIN";
+  reason:
+    | "STOPPED"
+    | "LEASE_ACTIVE"
+    | "EXTERNAL_PROCESS"
+    | "OWNERSHIP_UNCERTAIN"
+    | "CONFIG_CHANGED";
   activeVoiceLeases: number;
   snapshot: SupervisorSnapshot;
 };
