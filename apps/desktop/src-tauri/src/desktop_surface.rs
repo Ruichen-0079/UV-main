@@ -487,11 +487,13 @@ impl DesktopSurfaceManager {
     write_subtitle_window_state(&path, state)?;
 
     if let Some(window) = app.get_webview_window(SurfaceId::Subtitle.window_label()) {
-      // The native window may be hidden; applying now makes the next show
-      // deterministic, while show() below re-applies after realization too.
-      window
-        .set_ignore_cursor_events(locked)
-        .map_err(|error| error.to_string())?;
+      // Hidden/unrealized GTK windows do not have a dependable input shape.
+      // Persist now; apply immediately only when live, and always re-apply on Show.
+      if window.is_visible().map_err(|error| error.to_string())? {
+        window
+          .set_ignore_cursor_events(locked)
+          .map_err(|error| error.to_string())?;
+      }
     }
     Self::subtitle_presentation_state(app)
   }
