@@ -33,7 +33,7 @@ test("linux desktop launchers prefer XWayland for reliable topmost semantics", (
   assert.match(installedLauncher, /WAYLAND_DISPLAY/);
   assert.match(installedLauncher, /DISPLAY/);
   assert.match(installedLauncher, /export GDK_BACKEND=x11/);
-  assert.match(installedLauncher, /-z "\\${GDK_BACKEND:-}"/);
+  assert.ok(installedLauncher.includes('[ -z "${GDK_BACKEND:-}" ]'));
 
   const portableLauncher = fs.readFileSync(
     new URL("./linux-launcher.mjs", import.meta.url),
