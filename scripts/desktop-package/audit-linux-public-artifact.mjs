@@ -7,7 +7,10 @@ import { validateLocalSttArtifact } from "./build-local-stt.mjs";
 import { REPO_ROOT } from "./constants.mjs";
 
 const FORBIDDEN_NAME = [
-  /(^|\/)\.env$/i,
+  /(^|\/)\.env(?:\..*)?$/i,
+  /\.wav$/i,
+  /(^|\/)(?:state|controller-evidence)(\/|$)/i,
+  /(^|\/)(?:product-settings|voice-review|voice-binding-references|p8-corrections)\.json$/i,
   /(^|\/)speakers\.(json|npz)$/i,
   /(^|\/)0-four-speakers-zh\.wav$/i,
   /(^|\/)dots\.tts(\/|$)/i,

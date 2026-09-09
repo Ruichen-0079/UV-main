@@ -4,6 +4,7 @@
  * Optional native addons may remain external (not required for default in-memory mode).
  */
 import { build } from "esbuild";
+import { javascriptNotices } from "./javascript-notices.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -192,6 +193,7 @@ const __dirname = __yuviDirname(__filename);
   }
 
   writeJson(metafilePath, result.metafile);
+  writeJson(path.join(outDir, "THIRD_PARTY_NOTICES.runtime.json"), javascriptNotices(Object.keys(result.metafile.inputs)));
   const disallowed = collectDisallowedExternals(result.metafile);
   if (disallowed.length > 0) {
     throw new Error(

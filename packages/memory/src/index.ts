@@ -400,3 +400,5 @@ export {
 } from "./memory-vnext-text.js";
 
 export { modelContextBudget } from "./context-compression.js";
+
+export { LocalControllerEvidenceProvider } from "./providers/local-controller-evidence.js";

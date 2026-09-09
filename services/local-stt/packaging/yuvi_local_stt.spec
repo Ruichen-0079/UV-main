@@ -30,7 +30,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pkg_resources", "setuptools", "backports"],
+    excludes=["pkg_resources", "setuptools", "backports", "readline"],
     noarchive=False,
     optimize=0,
 )

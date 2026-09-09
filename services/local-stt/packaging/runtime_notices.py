@@ -4,6 +4,8 @@ import hashlib
 import importlib.metadata as metadata
 import json
 import sys
+import subprocess
+from urllib.parse import quote
 
 
 def stage_runtime_notices(output: Path) -> None:
@@ -23,6 +25,16 @@ def stage_runtime_notices(output: Path) -> None:
         python_license = Path(sys.base_prefix) / "LICENSE.txt"
     (dest / "CPython.LICENSE.txt").write_bytes(python_license.read_bytes())
     components.append({"name": "CPython", "version": sys.version.split()[0], "notice": "licenses/runtime/CPython.LICENSE.txt"})
+    # Debian's actual native runtime notices; PyInstaller flattens these library paths.
+    if sys.platform.startswith("linux") and Path("/etc/debian_version").is_file():
+        for package in ["libssl3", "libffi8", "libbz2-1.0", "liblzma5"]:
+            copyright_file = Path("/usr/share/doc") / package / "copyright"
+            name = f"Debian-{package}.copyright.txt"
+            (dest / name).write_bytes(copyright_file.read_bytes())
+            version = subprocess.check_output(["dpkg-query", "-W", "-f=${Version}", package], text=True)
+            components.append({"name": package, "version": version, "notice": f"licenses/runtime/{name}", "source": "https://sources.debian.org/src/" + subprocess.check_output(["dpkg-query", "-W", "-f=${source:Package}", package], text=True) + "/" + quote(subprocess.check_output(["dpkg-query", "-W", "-f=${source:Version}", package], text=True), safe="") + "/"})
+    core = metadata.distribution("sherpa-onnx-core")
+    components.append({"name": "sherpa-onnx-core", "version": core.version, "notice": f"licenses/runtime/sherpa-onnx-{core.version}.LICENSE.txt"})
     files = []
     for file in sorted((output / "_internal").rglob("*")):
         if file.is_file():

@@ -8,6 +8,7 @@ import { RuntimeOrchestrator, type RuntimeProactiveStateStore } from "@companion
 import { createFileProactiveStateStore } from "./proactive-policy-store.js";
 import { InMemoryEventBus } from "@companion/event-bus";
 import {
+  LocalControllerEvidenceProvider,
   LlmMemoryExtractor,
   MemoryService,
   RuleBasedMemoryExtractor,
@@ -219,6 +220,8 @@ export async function createAppContext(
       {
         kind: backendKind,
         mem0: mem0Backend,
+        controllerEvidence: backendKind === "legacy" && !env["MEM0_BASE_URL"] && env["YUVI_RUNTIME_DATA_DIR"]
+          ? new LocalControllerEvidenceProvider(env["YUVI_RUNTIME_DATA_DIR"]!) : undefined,
         searchTimeoutMs: runtimeConfig.memory.mem0TimeoutMs,
         writeTimeoutMs: 180_000,
         logger: runtimeLogger

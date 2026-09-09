@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT, MEMORY_MIGRATIONS_DIR } from "./constants.mjs";
+import { buildLinuxWeb } from "./build-linux-web.mjs";
 import { bundleSupervisorCjs } from "./build-supervisor.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import {
@@ -71,13 +72,14 @@ async function prepareLinuxNode(runtimeDir) {
   ensureDir(runtimeDir);
   const nodeDest = path.join(runtimeDir, "node");
   fs.copyFileSync(nodeSrc, nodeDest);
+  fs.copyFileSync(path.join(extractRoot, `node-v${NODE_VERSION}-linux-x64`, "LICENSE"), path.join(runtimeDir, "Node.LICENSE.txt"));
   fs.chmodSync(nodeDest, 0o755);
   return nodeDest;
 }
 function copyTreeFiltered(src, dest, skipNames) {
   ensureDir(dest);
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
-    if (skipNames.has(ent.name)) continue;
+    if (skipNames.has(ent.name) || /^\.env(?:\.|$)/.test(ent.name)) continue;
     const from = path.join(src, ent.name);
     const to = path.join(dest, ent.name);
     if (ent.isDirectory()) copyTreeFiltered(from, to, skipNames);
@@ -119,6 +121,7 @@ export async function prepareLinuxDailyPackage() {
     if (name.endsWith(".sql"))
       fs.copyFileSync(path.join(MEMORY_MIGRATIONS_DIR, name), path.join(migDest, name));
   }
+  await buildLinuxWeb();
   const webDistSrc = path.join(REPO_ROOT, "apps", "web", "dist");
   assertDir(webDistSrc, "apps/web/dist");
   copyTreeFiltered(webDistSrc, path.join(webDir, "dist"), new Set());

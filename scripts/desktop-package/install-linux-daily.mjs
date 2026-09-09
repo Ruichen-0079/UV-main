@@ -34,13 +34,24 @@ const applications = path.join(xdg("XDG_DATA_HOME", ".local/share"), "applicatio
 const envDir = path.resolve(
   process.env.YUVI_RUNTIME_ENV_DIR || path.join(xdg("XDG_CONFIG_HOME", ".config"), "YUVI")
 );
+if (process.argv.includes("--uninstall")) {
+  for (const args of [["--user", "disable", "--now", "yuvi-daily.service"], ["--user", "stop", "yuvi-daily-web.service"]]) {
+    const r = spawnSync("systemctl", args, { stdio: "inherit" });
+    if (r.status !== 0) throw new Error("Unable to stop YUVI integration; resources retained.");
+  }
+  for (const file of [path.join(unitDir, "yuvi-daily.service"), path.join(unitDir, "yuvi-daily-web.service"), path.join(applications, "yuvi-daily.desktop")]) fs.rmSync(file, { force: true });
+  const r = spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
+  if (r.status !== 0) throw new Error("Unable to reload user integration.");
+  console.log("YUVI integration removed. Durable DATA and CONFIG are preserved. Resource directory:", resourceRoot);
+  process.exit(0);
+}
 fs.mkdirSync(envDir, { recursive: true, mode: 0o700 });
 const stateRoot = path.join(xdg("XDG_DATA_HOME", ".local/share"), "YUVI/DesktopSupervisor");
 const quote = (v) =>
   '"' + v.replace(/\\\\/g, "\\\\\\\\").replace(/"/g, '\\\\"').replace(/%/g, "%%") + '"';
 const pathEnv = ["/usr/local/bin", "/usr/bin", "/bin"].filter((p) => fs.existsSync(p)).join(":");
 const common = (wd) =>
-  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
+  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_MEM0=0\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
 fs.mkdirSync(unitDir, { recursive: true });
 fs.mkdirSync(applications, { recursive: true });
 const execDaily = `${quote(nodeBin)} ${quote(supervisor)} --mode packaged --resource-root ${quote(resourceRoot)} --state-root ${quote(stateRoot)} --runtime-manifest ${quote(runtimeManifest)}`;

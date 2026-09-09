@@ -89,6 +89,7 @@ export type MemoryEmbeddingConfig = {
 export type MemoryServiceBackendConfig = {
   kind?: "legacy" | "mem0" | undefined;
   mem0?: MemoryBackend | undefined;
+  controllerEvidence?: MemoryProvider | undefined;
   searchTimeoutMs?: number | undefined;
   writeTimeoutMs?: number | undefined;
   ingestionPolicy?: Pick<MemoryIngestionPolicy, "build"> | undefined;
@@ -132,7 +133,7 @@ export class MemoryService {
     this.mem0SearchTimeoutMs = backend?.searchTimeoutMs ?? MEM0_CHAT_SEARCH_TIMEOUT_MS;
     this.mem0WriteTimeoutMs = backend?.writeTimeoutMs ?? MEM0_CHAT_WRITE_TIMEOUT_MS;
     this.mem0Logger = backend?.logger ?? embedding?.logger;
-    this.memoryProvider = this.mem0Backend ? new Mem0MemoryProvider(this.mem0Backend) : undefined;
+    this.memoryProvider = this.mem0Backend ? new Mem0MemoryProvider(this.mem0Backend) : backend?.controllerEvidence;
     this.memoryIngestionPolicy = backend?.ingestionPolicy ?? new MemoryIngestionPolicy();
   }
 
