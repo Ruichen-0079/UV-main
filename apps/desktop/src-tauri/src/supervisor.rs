@@ -43,10 +43,89 @@ struct EndpointFile {
   control_token: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRuntimeBinding {
+  mode: String,
+  ready: bool,
+  instance_id: Option<String>,
+  runtime_url: Option<String>,
+  error: Option<String>,
+}
+
 #[tauri::command]
 pub fn get_service_status(state: State<'_, SupervisorState>) -> Result<Value, String> {
   let (base, token) = require_endpoint(&state)?;
   http_json("GET", &format!("{base}/v1/status"), None, Some(&token))
+}
+
+/// Resolve the Runtime origin through the Supervisor instance already bound to
+/// this desktop process. Attach-only release shells must never infer a Runtime
+/// from a well-known port when that binding is unavailable or stale.
+#[tauri::command]
+pub fn get_desktop_runtime_binding(
+  state: State<'_, SupervisorState>,
+) -> DesktopRuntimeBinding {
+  let mode = if attach_existing_requested() { "attach" } else { "owned" };
+  match resolve_desktop_runtime_binding(&state, mode == "attach") {
+    Ok((instance_id, runtime_url)) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: true,
+      instance_id: Some(instance_id),
+      runtime_url: Some(runtime_url),
+      error: None,
+    },
+    Err(error) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: false,
+      instance_id: None,
+      runtime_url: None,
+      error: Some(error),
+    },
+  }
+}
+
+/// Explicit retry for the bounded attach-unavailable product state. It only
+/// re-runs pointer/endpoint attachment when this desktop has no bound endpoint;
+/// it never spawns a Supervisor or scans for arbitrary Runtime ports.
+#[tauri::command]
+pub fn retry_desktop_runtime_binding(app: AppHandle) -> DesktopRuntimeBinding {
+  let mode = if attach_existing_requested() { "attach" } else { "owned" };
+  if mode == "attach" {
+    let needs_attach = {
+      let state = app.state::<SupervisorState>();
+      require_endpoint_identity(&state).is_err()
+    };
+    if needs_attach {
+      if let Err(error) = attach_existing_supervisor(&app) {
+        return DesktopRuntimeBinding {
+          mode: mode.to_string(),
+          ready: false,
+          instance_id: None,
+          runtime_url: None,
+          error: Some(error),
+        };
+      }
+    }
+  }
+
+  let state = app.state::<SupervisorState>();
+  match resolve_desktop_runtime_binding(&state, mode == "attach") {
+    Ok((instance_id, runtime_url)) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: true,
+      instance_id: Some(instance_id),
+      runtime_url: Some(runtime_url),
+      error: None,
+    },
+    Err(error) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: false,
+      instance_id: None,
+      runtime_url: None,
+      error: Some(error),
+    },
+  }
 }
 
 #[tauri::command]
@@ -409,6 +488,65 @@ mod tests {
   #[test]
   fn openai_compatible_api_key_stays_out_of_supervisor_base_environment() {
     assert!(is_secret_env_key("OPENAI_COMPATIBLE_API_KEY"));
+  }
+
+  #[test]
+  fn attached_runtime_binding_requires_matching_owned_instance_runtime() {
+    let snapshot = serde_json::json!({
+      "instanceId": "portable-a",
+      "services": [{
+        "id": "runtime",
+        "ownership": "owned",
+        "url": "http://127.0.0.1:16121/"
+      }]
+    });
+    let (instance_id, runtime_url) =
+      super::runtime_binding_from_snapshot(&snapshot, "portable-a", true)
+        .expect("matching owned Runtime should bind");
+    assert_eq!(instance_id, "portable-a");
+    assert_eq!(runtime_url, "http://127.0.0.1:16121");
+  }
+
+  #[test]
+  fn attached_runtime_binding_rejects_stale_instance_identity() {
+    let snapshot = serde_json::json!({
+      "instanceId": "old-portable",
+      "services": [{
+        "id": "runtime",
+        "ownership": "owned",
+        "url": "http://127.0.0.1:16121"
+      }]
+    });
+    let error = super::runtime_binding_from_snapshot(&snapshot, "portable-a", true)
+      .expect_err("stale Supervisor identity must fail closed");
+    assert!(error.contains("identity mismatch"));
+  }
+
+  #[test]
+  fn attached_runtime_binding_rejects_external_or_foreign_runtime() {
+    let external = serde_json::json!({
+      "instanceId": "portable-a",
+      "services": [{
+        "id": "runtime",
+        "ownership": "external",
+        "url": "http://127.0.0.1:6121"
+      }]
+    });
+    let error = super::runtime_binding_from_snapshot(&external, "portable-a", true)
+      .expect_err("attach-only desktop must not adopt an external Runtime");
+    assert!(error.contains("not owned"));
+
+    let non_loopback = serde_json::json!({
+      "instanceId": "portable-a",
+      "services": [{
+        "id": "runtime",
+        "ownership": "owned",
+        "url": "http://192.0.2.10:16121"
+      }]
+    });
+    let error = super::runtime_binding_from_snapshot(&non_loopback, "portable-a", true)
+      .expect_err("non-loopback Runtime origin must be rejected");
+    assert!(error.contains("loopback"));
   }
 
   #[test]
@@ -1162,6 +1300,13 @@ fn status_emit_fingerprint(snapshot: &Value) -> String {
 }
 
 fn require_endpoint(state: &State<'_, SupervisorState>) -> Result<(String, String), String> {
+  let (base, token, _) = require_endpoint_identity(state)?;
+  Ok((base, token))
+}
+
+fn require_endpoint_identity(
+  state: &State<'_, SupervisorState>,
+) -> Result<(String, String, String), String> {
   let guard = state
     .inner
     .lock()
@@ -1177,7 +1322,73 @@ fn require_endpoint(state: &State<'_, SupervisorState>) -> Result<(String, Strin
     .control_token
     .clone()
     .ok_or_else(|| "desktop supervisor control token missing".to_string())?;
-  Ok((base, token))
+  let instance_id = guard
+    .instance_id
+    .clone()
+    .ok_or_else(|| "desktop supervisor instance identity missing".to_string())?;
+  Ok((base, token, instance_id))
+}
+
+fn resolve_desktop_runtime_binding(
+  state: &State<'_, SupervisorState>,
+  require_owned_runtime: bool,
+) -> Result<(String, String), String> {
+  let (base, token, expected_instance_id) = require_endpoint_identity(state)?;
+  let snapshot = http_json("GET", &format!("{base}/v1/status"), None, Some(&token))
+    .map_err(|error| format!("bound Supervisor status unavailable: {error}"))?;
+  runtime_binding_from_snapshot(&snapshot, &expected_instance_id, require_owned_runtime)
+}
+
+fn runtime_binding_from_snapshot(
+  snapshot: &Value,
+  expected_instance_id: &str,
+  require_owned_runtime: bool,
+) -> Result<(String, String), String> {
+  let instance_id = snapshot
+    .get("instanceId")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "bound Supervisor status is missing instance identity".to_string())?;
+  if instance_id != expected_instance_id {
+    return Err("bound Supervisor status identity mismatch".to_string());
+  }
+
+  let runtime = snapshot
+    .get("services")
+    .and_then(Value::as_array)
+    .and_then(|services| {
+      services
+        .iter()
+        .find(|service| service.get("id").and_then(Value::as_str) == Some("runtime"))
+    })
+    .ok_or_else(|| "bound Supervisor did not project a Runtime service".to_string())?;
+
+  if require_owned_runtime
+    && runtime.get("ownership").and_then(Value::as_str) != Some("owned")
+  {
+    return Err("attach-only desktop Runtime is not owned by its bound Supervisor".to_string());
+  }
+
+  let runtime_url = runtime
+    .get("url")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "bound Supervisor Runtime URL is unavailable".to_string())?;
+  let parsed = url::Url::parse(runtime_url)
+    .map_err(|_| "bound Supervisor Runtime URL is invalid".to_string())?;
+  if parsed.scheme() != "http"
+    || !endpoint_host_is_loopback(parsed.host_str().unwrap_or_default())
+    || !parsed.username().is_empty()
+    || parsed.password().is_some()
+    || (parsed.path() != "/" && !parsed.path().is_empty())
+    || parsed.query().is_some()
+    || parsed.fragment().is_some()
+  {
+    return Err("bound Supervisor Runtime URL is not a loopback HTTP origin".to_string());
+  }
+
+  Ok((
+    instance_id.to_string(),
+    parsed.origin().ascii_serialization(),
+  ))
 }
 
 #[derive(Debug, Deserialize)]
