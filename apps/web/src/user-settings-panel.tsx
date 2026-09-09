@@ -166,7 +166,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         </div>
       }
     >
-      {state.saving && <AsyncProgress label="Saving…" />}
+      {state.saving && <AsyncProgress label={t("Saving…")} />}
       <div className="settings-banner space-y-2">
         {state.loading && <Notice tone="info" title={t("Loading")} message={t("Reading user settings…")} />}
         {state.loadError && (
