@@ -5,13 +5,18 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { auditLinuxAbi } from "./audit-linux-abi.mjs";
 import { auditLinuxPublicArtifact } from "./audit-linux-public-artifact.mjs";
+import { releaseVersion, releaseSource } from "./release-identity.mjs";
 import { LINUX_BUILD_ROOT } from "./prepare-linux-daily.mjs";
 const root = path.resolve(process.argv[2] || LINUX_BUILD_ROOT);
 const output = path.resolve(process.argv[3] || path.join(root, "..", "release"));
+const source = releaseSource();
+const version = releaseVersion();
 auditLinuxPublicArtifact(root);
 const abi = auditLinuxAbi(root);
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "install-manifest.json"), "utf8"));
 if (!/^[a-f0-9]{40}$/.test(manifest.checkoutSha)) throw new Error("Missing source identity.");
+if (manifest.checkoutSha !== source || manifest.version !== version)
+  throw new Error("Package source/version differs from the clean release checkout.");
 const epoch = execFileSync("git", ["show", "-s", "--format=%ct", manifest.checkoutSha], {
   encoding: "utf8"
 }).trim();
@@ -24,6 +29,7 @@ const files = fs
 const sbom = {
   schemaVersion: 1,
   checkoutSha: manifest.checkoutSha,
+  version,
   platform: "linux-x64",
   abi,
   noticeInventories: files.filter((name) =>
@@ -37,7 +43,7 @@ const sbom = {
 };
 fs.writeFileSync(path.join(root, "release-sbom.json"), JSON.stringify(sbom, null, 2) + "\n");
 fs.mkdirSync(output, { recursive: true });
-const portable = path.join(output, "yuvi-v0.1.0-linux-x64-portable.tar.zst");
+const portable = path.join(output, `yuvi-v${version}-linux-x64-portable.tar.zst`);
 execFileSync("tar", [
   "--sort=name",
   `--mtime=@${epoch}`,
@@ -55,7 +61,7 @@ execFileSync("tar", [
 ]);
 const archive = fs.readFileSync(portable);
 const hash = sha256(portable);
-const installer = path.join(output, "yuvi-v0.1.0-linux-x64-installer.run");
+const installer = path.join(output, `yuvi-v${version}-linux-x64-installer.run`);
 const header = `#!/bin/sh
 set -eu
 umask 077
@@ -83,14 +89,15 @@ exit 0
 __YUVI_ARCHIVE_BELOW__
 `;
 fs.writeFileSync(installer, Buffer.concat([Buffer.from(header), archive]), { mode: 0o755 });
-const artifacts = [installer, portable].map((file) => ({
+fs.copyFileSync(path.join(root, "release-sbom.json"), path.join(output, "release-sbom.json"));
+const artifacts = [installer, portable, path.join(output, "release-sbom.json")].map((file) => ({
   file: path.basename(file),
   bytes: fs.statSync(file).size,
   sha256: sha256(file)
 }));
 fs.writeFileSync(
   path.join(output, "artifacts.json"),
-  JSON.stringify({ checkoutSha: manifest.checkoutSha, artifacts }, null, 2) + "\n"
+  JSON.stringify({ version, checkoutSha: manifest.checkoutSha, artifacts }, null, 2) + "\n"
 );
 fs.writeFileSync(
   path.join(output, "SHA256SUMS"),

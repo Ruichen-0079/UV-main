@@ -102,6 +102,7 @@ test(
         "#!/bin/sh\nexit 0\n",
         { mode: 0o755 }
       );
+      fs.writeFileSync(path.join(resource, "desktop", "yuvi.png"), "PNG");
       fs.copyFileSync(
         path.join(root, "scripts/desktop-package/install-linux-daily.mjs"),
         path.join(resource, "install-linux-daily.mjs")
@@ -136,6 +137,7 @@ test(
         "utf8"
       );
       assert.match(desktopEntry, /yuvi-desktop-launcher/);
+      assert.ok(desktopEntry.includes(`Icon=${path.join(resource, "desktop", "yuvi.png")}`));
       assert.doesNotMatch(desktopEntry, /xdg-open/);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });

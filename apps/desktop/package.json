@@ -1,6 +1,6 @@
 {
   "name": "@companion/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Tauri shell hosting the YUVI main chat window and the Lumi companion window.",
   "type": "module",

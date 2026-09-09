@@ -1,6 +1,6 @@
 [package]
 name = "yuvi-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "YUVI desktop companion shell (Tauri)"
 edition = "2021"
 
