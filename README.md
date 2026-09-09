@@ -1,39 +1,122 @@
-# YUVI Runtime
+# YUVI
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-YUVI Runtime is a local-first, event-driven AI companion runtime. The repository is an original implementation inspired by the architectural ambition of Project AIRI, but it does not copy AIRI code.
+**A local-first personal AI companion built for long-term interaction.**
 
-The product goal is not a chatbot page. YUVI is being built as a durable companion runtime that can support conversation, memory, proactive behavior, provider-backed cognition, voice/vision, avatar presentation, and later identity/relationship/continuity systems behind stable runtime boundaries.
+YUVI brings conversation, voice, long-term memory, identity-aware context, Live2D presentation and desktop presence into one persistent companion system.
 
-## Current Status
+Its focus is not to become the largest AI character platform or a general-purpose computer agent. YUVI is being built around a narrower question: **how can an AI companion remain useful, recognizable and reliable over long periods of personal use?**
 
-Structural Debt Paydown is complete after the P4 reliability work and the first useful P6 proactive-text implementation.
+<!-- Add a current product screenshot / short demo here. -->
 
-Already established:
+## Current Release
 
-- Runtime orchestration is separated from the package barrel and canonical runtime contracts/errors have dedicated seams.
-- Conversation persistence and finalized-turn ingestion preserve durable lifecycle, idempotency, retry/reconcile, crash-recovery, and fail-closed semantics.
-- P6 proactive text supports assistant-only turns, strict `NO_OP` / `REQUEST_TEXT` control, cancellation fencing, one-shot idempotency, fresh effect identities, and no synthetic user message or proactive memory-write authority.
-- Dashboard presentation, Settings, Chat, and large Core runtime responsibilities have been decomposed without redesigning behavior.
-- Core Runtime tests were split mechanically by semantic island. R5A1–R5A4 are complete, Runtime test decomposition is complete, and current product work is unblocked to begin P8.
+**YUVI v0.1.1** is the current public release.
 
-The next product phase is P8: explicit identity/persona/relationship behavior grounded in evidence rather than inferred as hidden authoritative state. The broader companion roadmap is documented under [`docs/future/`](docs/future/).
+- Linux x86-64 installer: `yuvi-v0.1.1-linux-x64-installer.run`
+- Linux x86-64 portable build: `yuvi-v0.1.1-linux-x64-portable.tar.zst`
+- Release notes and checksums: https://github.com/Ruichen-0079/YUVI/releases/tag/v0.1.1
 
-## Development Baseline
+Linux is the current primary release and validation target. Windows remains a supported development and packaging target, but does not yet have the same public release path.
 
-YUVI is **Linux-first** for development and production validation.
+## What YUVI Can Do Today
 
-Primary development assumptions:
+### Conversation and cognition
 
-- Linux host
-- Node.js + pnpm
-- Docker Engine / Docker Compose for development PostgreSQL and supporting infrastructure
-- PostgreSQL + pgvector as the durable persistence path currently validated in production-like runtime tests
+- Persistent text conversation through the YUVI Runtime.
+- Configurable Chat, Reasoning, Embedding, STT, TTS and Vision capability routes.
+- Provider fallback without coupling Runtime behavior to a single vendor.
+- Explicit image / vision use through configured providers rather than continuous screen monitoring.
 
-Windows remains a supported translation/packaging target, but Windows-specific packaged PostgreSQL ownership machinery is intentionally deferred until product behavior is stable. Do not expand platform-specific infrastructure at the expense of Runtime semantics.
+### Voice
 
-Quick start on Linux:
+- Speech-to-text and text-to-speech integration.
+- Packaged Local STT support in the Linux release.
+- Voice and speaker-profile management for personal use.
+- Speaker matching and diarization remain experimental and are not authentication mechanisms.
+
+### Memory and people
+
+- Durable conversation persistence and long-term memory.
+- PostgreSQL + pgvector as the validated durable storage path.
+- Evidence-based person/profile context rather than hidden inferred persona truth.
+- Memory retrieval, maintenance, expiry and supersession support.
+
+### Desktop companion experience
+
+- Live2D desktop presentation.
+- Direct import of user-provided VTube Studio ZIP packages.
+- Transparent Companion and Subtitle desktop surfaces.
+- Window placement, visibility, always-on-top and lock/unlock controls.
+- System tray controls.
+- Guided first-run setup.
+- English and Simplified Chinese product UI.
+
+### Reliability
+
+YUVI treats long-running behavior as a product requirement rather than an implementation detail. The Runtime preserves explicit lifecycle ownership, durable turn handling, idempotency, retry/reconcile behavior, crash recovery, cancellation fencing and fail-closed boundaries around ambiguous external effects.
+
+## Product Direction
+
+YUVI is organized around five long-term product concerns:
+
+- **Character** — a recognizable and stable identity rather than a disposable prompt.
+- **Conversation** — natural text and voice interaction.
+- **Memory** — durable personal context with explicit evidence and ownership.
+- **Perception** — obtain environmental information when it is actually needed.
+- **Runtime** — decide, execute and recover reliably over long periods of use.
+
+Live2D, subtitles, voice and the WebUI are presentation surfaces around that core rather than separate sources of behavioral authority.
+
+## How It Fits Together
+
+```text
+                       +------------------+
+                       |  Memory / People |
+                       +---------+--------+
+                                 |
+Text / Voice / Image --->   YUVI Runtime   <--- Providers / Models
+                                 |
+                    +------------+------------+
+                    |            |            |
+                    v            v            v
+                Character    Perception    Actions
+                    |
+                    v
+             Desktop Presence
+          Live2D · Voice · Subtitle
+```
+
+The Runtime owns execution lifecycle and canonical state transitions. Presentation layers do not bypass it.
+
+## Local-First and Privacy
+
+YUVI is **local-first**, not necessarily fully offline.
+
+Runtime state, local configuration and supported personal data paths are designed to remain under the user's control. Cloud-backed providers can still be configured for Chat, Reasoning, STT, TTS, Vision or Embedding; when they are used, the relevant request data is sent to those providers according to their own policies.
+
+Current Vision behavior is explicit and one-shot. YUVI does not require continuous desktop screenshot monitoring.
+
+Secrets must stay in local configuration and must not be committed to the repository or emitted through logs, events or error payloads.
+
+## Getting Started
+
+### Use the released Linux build
+
+Download **v0.1.1** from:
+
+https://github.com/Ruichen-0079/YUVI/releases/tag/v0.1.1
+
+The Linux x86-64 release currently targets Debian 12 / glibc 2.36 and expects the system GTK/WebKitGTK 4.1 and AppIndicator runtime libraries. Some provider credentials, models and local services still require configuration.
+
+Live2D Cubism Core and proprietary character assets are not bundled.
+
+### Develop from source
+
+YUVI is Linux-first for development and production-like validation.
+
+Requirements include Node.js, pnpm, Docker/Compose for development infrastructure, and PostgreSQL + pgvector for the durable persistence path.
 
 ```bash
 pnpm install
@@ -41,179 +124,81 @@ cp .env.example .env
 ./scripts/dev.sh
 ```
 
-Development URLs:
+Development endpoints:
 
 - Server: `http://localhost:6121`
 - Web UI: `http://localhost:5173`
 - WebSocket: `ws://localhost:6121/ws`
 
-Health and shutdown:
+Useful commands:
 
 ```bash
-./scripts/health.sh
-./scripts/stop.sh
-```
-
-Windows development scripts remain available where useful:
-
-```powershell
-.\scripts\dev.ps1
-.\scripts\health.ps1
-.\scripts\stop.ps1
-```
-
-See [`docs/quickstart.md`](docs/quickstart.md) and [`docs/windows-development.md`](docs/windows-development.md) for platform-specific setup details.
-
-## Repository Structure
-
-- `apps/server`: Fastify HTTP/WebSocket runtime server and composition root.
-- `apps/web`: development dashboard for observing and controlling Runtime behavior.
-- `packages/protocol`: runtime event types and schemas.
-- `packages/event-bus`: event-bus abstraction and in-memory implementation.
-- `packages/memory`: conversation persistence, durable memory, finalized-ingestion ledger, retrieval, and maintenance boundaries.
-- `packages/prompt-builder`: provider-neutral prompt assembly.
-- `packages/providers`: provider interfaces, registry, normalized errors, and vendor adapters.
-- `packages/core`: Runtime contracts, errors, orchestration, and behavioral integration.
-- `packages/config`: typed runtime configuration and redaction boundary.
-- `docs/future`: planned post-structural companion architecture, beginning with P8.
-
-## Runtime Principles
-
-### Runtime owns execution
-
-Runtime owns effect lifecycle, execution admission, cancellation, persistence coordination, provider execution, and canonical publication. Presentation layers and future character systems must not bypass it.
-
-### Memory is evidence, not hidden persona truth
-
-Conversation persistence and long-term memory are distinct. Memory owns evidence record storage, eligibility, ranking, validity/status, retention, and expiry. Future P8 logic may interpret authorized evidence, but Memory itself is not authoritative relationship/persona state.
-
-### Providers are replaceable
-
-`packages/core` depends on provider-facing contracts, not vendor SDKs. Vendor request/response translation belongs in `packages/providers`.
-
-### Reliability semantics are assets
-
-Structural work must preserve already-proven guarantees such as finalized-turn lifecycle, durable ingestion, semantic idempotency, retry/reconcile behavior, crash recovery, cancellation fencing, and protection from ambiguous external side effects.
-
-### Prefer smaller semantic diffs
-
-When a cleaner abstraction conflicts with a smaller behavior-preserving change, prefer the smaller semantic diff. Structural cleanup must not quietly become product redesign.
-
-## Main Runtime Flows
-
-Normal user turn:
-
-```text
-User input
-  -> Runtime admission / persistence
-  -> context + Memory retrieval
-  -> prompt construction
-  -> provider execution
-  -> assistant persistence / finalized-turn handling
-  -> runtime publication
-  -> optional presentation side effects
-```
-
-Current P6 assistant-initiated text turn:
-
-```text
-ProactiveDecisionProvider
-  -> NO_OP
-     or
-  -> REQUEST_TEXT
-  -> assistant continuation
-  -> Runtime execution commit
-  -> assistant-only proactive stream
-```
-
-The proactive path does not synthesize a user message, does not gain memory-write authority, and does not gain separate TTS/voice authority.
-
-## Provider Mapping
-
-The current default provider direction is:
-
-- Chat: DeepSeek
-- Reasoning: DeepSeek
-- TTS: xAI
-- STT: Alibaba Cloud DashScope
-- Vision: xAI
-- Embedding: configurable OpenAI-compatible / provider chain
-
-Provider routing is configurable and fallback-aware. `packages/core` must not import concrete DeepSeek, xAI, or Alibaba clients directly.
-
-Example configuration:
-
-```env
-CHAT_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-REASONING_PROVIDER_CHAIN=deepseek,nvidia,local,mock
-EMBEDDING_PROVIDER_CHAIN=openai-compatible,nvidia,local,mock
-TTS_PROVIDER_CHAIN=xai,local,mock
-STT_PROVIDER_CHAIN=dashscope,local,mock
-VISION_PROVIDER_CHAIN=xai,nvidia,local,mock
-```
-
-Secrets belong only in local environment/configuration sources and must not be committed or emitted into logs, events, or error payloads.
-
-## Persistence
-
-Development can run with in-memory persistence, but durable validation uses PostgreSQL:
-
-```env
-MEMORY_REPOSITORY=postgres
-DATABASE_URL=postgres://yuvi:yuvi_dev_password@localhost:5432/yuvi
-```
-
-Start development infrastructure and apply migrations:
-
-```bash
-docker compose -f infra/docker-compose.yml up -d
-pnpm db:migrate
-pnpm smoke:postgres
-```
-
-PostgreSQL currently carries the proven durable Runtime path. Redis and NATS remain supporting/future infrastructure rather than reasons to split the Runtime into heavy microservices.
-
-## Common Commands
-
-```bash
-pnpm install
 pnpm check
 pnpm test
 pnpm build
-pnpm db:migrate
 pnpm smoke
+pnpm db:migrate
 pnpm smoke:postgres
-pnpm memory:index:status
-pnpm memory:maintenance
 ```
 
-Useful scripts:
+See [Quick Start](docs/quickstart.md) and [Linux daily use](docs/linux-daily-use.md) for the current setup and lifecycle details.
 
-- `./scripts/dev.sh`: primary Linux development entry point.
-- `./scripts/health.sh`: development health/status checks.
-- `./scripts/stop.sh`: stop local development services.
-- `pnpm db:migrate`: apply PostgreSQL memory migrations.
-- `pnpm db:reset:dev`: guarded development database reset.
-- `pnpm memory:embed:backfill`: backfill embeddings for existing PostgreSQL memories.
-- `pnpm memory:index:status`: inspect pgvector/ANN index status.
-- `pnpm memory:maintenance`: audit expiry/staleness/supersession maintenance state.
+## Repository Structure
 
-## Roadmap Boundary
+- `apps/server` — Fastify HTTP/WebSocket Runtime server and composition root.
+- `apps/web` — Product WebUI.
+- `apps/desktop` — desktop presentation shell where applicable.
+- `packages/core` — Runtime orchestration and behavioral integration.
+- `packages/memory` — durable conversation and long-term memory boundaries.
+- `packages/providers` — provider contracts, registry and vendor adapters.
+- `packages/prompt-builder` — provider-neutral prompt assembly.
+- `packages/protocol` — runtime events and schemas.
+- `packages/config` — typed configuration and redaction boundaries.
+- `docs/future` — future architecture and product planning; not a statement of implemented behavior.
 
-The implementation roadmap is intentionally staged.
+## Engineering Principles
 
-Next product order:
+- **Runtime owns execution.**
+- **Memory is evidence, not hidden persona truth.**
+- **Providers are replaceable.**
+- **Reliability semantics are product assets.**
+- **Prefer small, behavior-preserving changes over speculative architecture.**
+
+These rules exist to keep one long-lived companion from turning into several competing lifecycle or state authorities.
+
+## Research Direction
+
+YUVI is also intended to serve as an experimental platform for long-term human-AI interaction.
+
+Current areas of interest include:
+
+- **Anthropomorphic conversational models** — making companion dialogue more natural, socially expressive and character-consistent instead of merely assistant-like.
+- **Personalized attention policies** — learning when a persistent companion should observe, remain silent or initiate interaction.
+- **Long-term identity and relationship continuity** — preserving coherent personal context over extended use.
+
+These are research directions, not claims that YUVI has already solved them.
+
+## Roadmap
+
+Near-term work remains deliberately product-focused:
 
 ```text
-P8 identity / persona / relationship
-  -> temporal substrate
-  -> continuity and attention
-  -> Character ABI / Character Harness
-  -> Cognition and capabilities
-  -> embodied presentation / agency
-  -> Character post-training
+reliability
+  -> desktop closure
+  -> UX simplification
+  -> documentation
+  -> stable releases
+  -> deeper companion intelligence
 ```
 
-Future documents are planning authority only; they do not imply those systems are implemented. See [`docs/future/README.md`](docs/future/README.md).
+Future architecture documents live under [docs/future](docs/future/). They are planning authority only and do not imply implementation.
 
-Linux checkout daily installation, lifecycle and acceptance: [Linux daily use](docs/linux-daily-use.md).
+## Inspirations
+
+YUVI was initially inspired in part by the ambition of [Project AIRI](https://github.com/moeru-ai/airi) and the broader open AI VTuber / companion ecosystem.
+
+YUVI is an independent implementation and has since developed around a different emphasis: persistent personal companionship, continuity, local-first operation and Runtime reliability.
+
+## License
+
+See the repository license for the terms that apply to YUVI source code and bundled assets. Third-party models, Live2D Cubism components and character assets may have separate licenses.
