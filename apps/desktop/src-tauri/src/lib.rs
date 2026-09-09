@@ -213,6 +213,9 @@ pub fn run() {
       Ok(())
     })
     .on_window_event(|window, event| {
+      if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+        DesktopSurfaceManager::persist_companion_geometry(window);
+      }
       if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         match lifecycle::window_close_action(window.label(), app_shutdown_started()) {
           lifecycle::WindowCloseAction::Hide => {
