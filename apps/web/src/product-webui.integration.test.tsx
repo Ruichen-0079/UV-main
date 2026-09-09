@@ -30,6 +30,15 @@ vi.mock("./companion-appearance-settings.js", () => ({
 vi.mock("./subtitle-appearance-settings.js", () => ({
   SubtitleAppearanceSettings: () => <div>Subtitle window controls</div>
 }));
+vi.mock("./product-first-run-setup.js", () => ({
+  ProductFirstRunSetup: ({ onNavigate }: { onNavigate(view: "advanced" | "appearance"): void }) => (
+    <div>
+      <span>First-run setup controls</span>
+      <button type="button" onClick={() => onNavigate("advanced")}>Configure Chat</button>
+      <button type="button" onClick={() => onNavigate("appearance")}>Choose Companion model</button>
+    </div>
+  )
+}));
 vi.mock("./product-memory-settings.js", () => ({ ProductMemorySettings: () => <div>Memory connection</div> }));
 vi.mock("./product-configuration.js", () => ({
   ProductConfigurationPanel: ({ sections }: { sections?: readonly string[] }) => (
@@ -73,8 +82,19 @@ describe("Product WebUI integration", () => {
   it("separates daily-use concerns while keeping advanced and Developer reachable", async () => {
     const { ProductWebUI } = await import("./product-webui.js");
     const node = await mount(<ProductWebUI />);
+    expect(readText(node)).toContain("First-run setup controls");
     expect(readText(node)).not.toContain("Configuration sections:");
 
+    await act(async () => click(button(node, "Configure Chat")));
+    expect(readText(node)).toContain("Configuration sections: status,providers,routes,proactive");
+    expect(readText(node)).toContain("Desktop settings");
+
+    await act(async () => click(button(node, "Home")));
+    await act(async () => click(button(node, "Choose Companion model")));
+    expect(readText(node)).toContain("Live2D controls");
+    expect(readText(node)).toContain("Companion window controls");
+
+    await act(async () => click(button(node, "Home"));
     await act(async () => click(button(node, "Models")));
     expect(readText(node)).toContain("Configuration sections: models");
     expect(readText(node)).not.toContain("Configuration sections: people,voices");
