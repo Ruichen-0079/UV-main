@@ -27,6 +27,20 @@ import {
  * Companion must not mount this component.
  * Local reducer only — keystrokes never invoke Rust until Save.
  */
+function localizeUserSettingsSaveMessage(message: string): string {
+  if (message === "Settings saved.") return t("Settings saved.");
+  if (message === "Secret updated.") return t("Secret updated.");
+  if (message === "Settings saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.")
+    return t("Settings saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.");
+  if (message === "Secret saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.")
+    return t("Secret saved, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.");
+  const apply = message.match(/^Secret updated\. Applying changes to: (.+)\.$/u);
+  if (apply) return t("Secret updated. Applying changes to: {0}.", apply[1]);
+  const reload = message.match(/^Settings saved\. Services may reload: (.+)\.$/u);
+  if (reload) return t("Settings saved. Services may reload: {0}.", reload[1]);
+  return t(message);
+}
+
 export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
   onTtsSettings?: (settings: TtsSettingsProjection, revision: number) => void;
 }): JSX.Element | null {
@@ -166,7 +180,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
         </div>
       }
     >
-      {state.saving && <AsyncProgress label="Saving…" />}
+      {state.saving && <AsyncProgress label={t("Saving…")} />}
       <div className="settings-banner space-y-2">
         {state.loading && <Notice tone="info" title={t("Loading")} message={t("Reading user settings…")} />}
         {state.loadError && (
@@ -178,16 +192,16 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             tone={state.saveMessage.includes("Supervisor was unavailable") ? "warning" : "info"}
             title={
               state.saveMessage.includes("Supervisor was unavailable")
-                ? "Saved (sync pending)"
+                ? t("Saved (sync pending)")
                 : t("Saved")
             }
-            message={state.saveMessage}
+            message={localizeUserSettingsSaveMessage(state.saveMessage)}
           />
         )}
       </div>
 
       <div className="settings-grid">
-        <p>Providers, models, and voice routes are configured in Product configuration.</p>
+        <p>{t("Providers, models, and voice routes are configured in Product configuration.")}</p>
 
         <section className="settings-card">
           <h3>{t("Memory")}</h3>
@@ -240,7 +254,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.databaseUrl ? "Enter to replace" : t("Paste connection string")
+                state.secrets.databaseUrl ? t("Enter to replace") : t("Paste connection string")
               }
               value={form.databaseUrlInput}
               onChange={(e) => setField("databaseUrlInput", e.target.value)}
@@ -297,7 +311,7 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
               type="password"
               autoComplete="off"
               placeholder={
-                state.secrets.memoryLlmApiKey ? "Enter to replace" : t("Paste Memory LLM API key")
+                state.secrets.memoryLlmApiKey ? t("Enter to replace") : t("Paste Memory LLM API key")
               }
               value={form.memoryLlmApiKeyInput}
               onChange={(e) => setField("memoryLlmApiKeyInput", e.target.value)}
