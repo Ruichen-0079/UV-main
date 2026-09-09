@@ -23,7 +23,7 @@ function healthLabel(
   loading: boolean,
   error: string | null
 ): string {
-  return productCompactHealthItems({ health, loading, error })[0]?.summary ?? "Unknown";
+  return t(productCompactHealthItems({ health, loading, error })[0]?.summary ?? "Unknown");
 }
 
 /**
@@ -62,7 +62,7 @@ export function ProductWebUI(): JSX.Element {
           onClick={() => void health.refresh()}
           title={t("Refresh product status")}
         >
-          <span className="yuvi-health-chip-label">Runtime</span>
+          <span className="yuvi-health-chip-label">{t("Runtime")}</span>
           <span>{status}</span>
         </button>
         <div className="yuvi-topbar-actions">
@@ -139,12 +139,12 @@ export function ProductWebUI(): JSX.Element {
             {health.error ? (
               <section className="yuvi-card yuvi-card-alert">
                 <div className="font-semibold">
-                  {health.data ? "Product status refresh incomplete" : "Runtime health unavailable"}
+                  {health.data ? t("Product status refresh incomplete") : t("Runtime health unavailable")}
                 </div>
                 <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">
                   {health.data
-                    ? "Showing the last successful Runtime projection."
-                    : "Current status remains unknown until the Runtime health endpoint responds."}
+                    ? t("Showing the last successful Runtime projection.")
+                    : t("Current status remains unknown until the Runtime health endpoint responds.")}
                 </p>
               </section>
             ) : null}
