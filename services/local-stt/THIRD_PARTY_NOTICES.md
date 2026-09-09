@@ -37,6 +37,7 @@ Code/runtime licenses are recorded separately from model-weight licenses.
 - Upstream: https://github.com/alibaba-damo-academy/3D-Speaker
 - Redistribution: k2-fsa/sherpa-onnx speaker-recognition-models
 - License: Apache License 2.0
+- Full license text: `licenses/3D-Speaker.LICENSE.txt`
 
 ### pyannote speaker segmentation 3.0
 
@@ -53,7 +54,8 @@ Code/runtime licenses are recorded separately from model-weight licenses.
 - Packaged file: `models/silero_vad.onnx`
 - Upstream: https://github.com/snakers4/silero-vad
 - Redistribution: k2-fsa/sherpa-onnx `asr-models/silero_vad.onnx`
-- License: MIT License (silero-vad)
+- License: MIT License (silero-vad, Copyright Silero Team)
+- Full license text: `licenses/silero-vad.LICENSE.txt`
 
 ## Runtime and native dependencies
 

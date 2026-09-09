@@ -9,7 +9,9 @@
   "notices": [
     "THIRD_PARTY_NOTICES.md",
     "licenses/FUNASR_MODEL_LICENSE.txt",
-    "licenses/pyannote-segmentation-3.0.LICENSE.txt"
+    "licenses/pyannote-segmentation-3.0.LICENSE.txt",
+    "licenses/silero-vad.LICENSE.txt",
+    "licenses/3D-Speaker.LICENSE.txt"
   ],
   "models": [
     {
@@ -34,6 +36,7 @@
       "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
       "upstream": "https://github.com/alibaba-damo-academy/3D-Speaker",
       "license": "Apache-2.0",
+      "licenseFile": "licenses/3D-Speaker.LICENSE.txt",
       "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
       "bytes": 39593761
     },
@@ -55,6 +58,7 @@
       "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
       "upstream": "https://github.com/snakers4/silero-vad",
       "license": "MIT",
+      "licenseFile": "licenses/silero-vad.LICENSE.txt",
       "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
       "bytes": 643854
     }

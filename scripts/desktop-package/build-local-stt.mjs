@@ -272,8 +272,15 @@ export function validateLocalSttArtifact(artifactDir, options = {}) {
     throw new Error("Local STT _internal directory is missing or empty.");
   if (!regularFile(noticesPath))
     throw new Error("Local STT THIRD_PARTY_NOTICES.md is missing from the artifact.");
-  if (!regularFile(path.join(root, "licenses", "FUNASR_MODEL_LICENSE.txt")))
-    throw new Error("FunASR model license text is missing from the artifact.");
+  for (const required of [
+    "FUNASR_MODEL_LICENSE.txt",
+    "pyannote-segmentation-3.0.LICENSE.txt",
+    "silero-vad.LICENSE.txt",
+    "3D-Speaker.LICENSE.txt"
+  ]) {
+    if (!regularFile(path.join(root, "licenses", required)))
+      throw new Error(`${required} is missing from the Local STT artifact.`);
+  }
   if (!fs.existsSync(modelRoot) || !fs.statSync(modelRoot).isDirectory())
     throw new Error("Local STT model directory is missing.");
   for (const model of modelManifest.models ?? []) {

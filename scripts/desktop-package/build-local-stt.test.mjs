@@ -88,6 +88,41 @@ test("SenseVoice packaged license is not Apache-2.0", () => {
   assert.match(notices, /This is \*\*not\*\* Apache-2\.0/);
 });
 
+test("packaged model licenses bundle required provenance files", () => {
+  const root = new URL("../../services/local-stt/", import.meta.url);
+  const manifest = JSON.parse(
+    fs.readFileSync(new URL("./models.manifest.json", root), "utf8")
+  );
+  const byRole = Object.fromEntries(manifest.models.map((model) => [model.role, model]));
+  assert.equal(byRole["speaker-embedding"].license, "Apache-2.0");
+  assert.equal(
+    byRole["speaker-embedding"].licenseFile,
+    "licenses/3D-Speaker.LICENSE.txt"
+  );
+  assert.equal(byRole["diarization-segmentation"].license, "MIT");
+  assert.equal(byRole["vad"].license, "MIT");
+  assert.equal(byRole["vad"].licenseFile, "licenses/silero-vad.LICENSE.txt");
+  for (const name of [
+    "FUNASR_MODEL_LICENSE.txt",
+    "pyannote-segmentation-3.0.LICENSE.txt",
+    "silero-vad.LICENSE.txt",
+    "3D-Speaker.LICENSE.txt"
+  ]) {
+    const text = fs.readFileSync(new URL(`./licenses/${name}`, root), "utf8");
+    assert.ok(text.length > 200, name);
+  }
+  const silero = fs.readFileSync(new URL("./licenses/silero-vad.LICENSE.txt", root), "utf8");
+  assert.match(silero, /Silero Team/);
+  const speaker = fs.readFileSync(new URL("./licenses/3D-Speaker.LICENSE.txt", root), "utf8");
+  assert.match(speaker, /Apache License/);
+  for (const notice of manifest.notices ?? []) {
+    assert.ok(
+      fs.existsSync(new URL(`./${notice}`, root)),
+      `notice missing: ${notice}`
+    );
+  }
+});
+
 for (const [name, overrides, message] of [
   ["rejects non-Windows", { platform: "linux" }, /Windows/],
   ["rejects the wrong sherpa-onnx", { sherpaOnnx: "1.12.0" }, /sherpa-onnx/],
