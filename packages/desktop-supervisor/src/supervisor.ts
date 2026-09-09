@@ -556,6 +556,7 @@ export class DesktopSupervisor {
    * and the last lease release performs the deferred owned stop.
    */
   async suspendLocalStt(): Promise<LocalSttSuspendResult> {
+    if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
     // Publish first: an in-flight Local STT readiness loop observes this even
     // if another operation currently owns its service queue.
     this.localSttManualSuspend = true;
@@ -660,6 +661,7 @@ export class DesktopSupervisor {
   /** Bounded explicit product operation; no process ownership lives in Runtime. */
   async acquireVoiceLease(): Promise<{ leaseId: string; baseUrl: string }> {
     this.localSttLeaseAcquisitions += 1;
+    let acquisitionPending = true;
     try {
       return await this.withConfigLock(async () => {
         if (this.shuttingDown) throw new Error("Supervisor is shutting down.");
@@ -680,11 +682,17 @@ export class DesktopSupervisor {
         const leaseId = randomUUID();
         const timer = setTimeout(() => { void this.releaseVoiceLease(leaseId).catch(() => {}); }, 180_000);
         timer.unref();
+        // Convert pending acquisition -> active lease synchronously so suspend
+        // never double-counts one explicit voice operation.
+        this.localSttLeaseAcquisitions = Math.max(0, this.localSttLeaseAcquisitions - 1);
+        acquisitionPending = false;
         this.voiceLeases.set(leaseId, timer);
         return { leaseId, baseUrl: this.config.localSttUrl ?? "http://127.0.0.1:9876" };
       });
     } finally {
-      this.localSttLeaseAcquisitions = Math.max(0, this.localSttLeaseAcquisitions - 1);
+      if (acquisitionPending) {
+        this.localSttLeaseAcquisitions = Math.max(0, this.localSttLeaseAcquisitions - 1);
+      }
     }
   }
 
