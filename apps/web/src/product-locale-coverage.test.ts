@@ -55,7 +55,19 @@ describe("zh-CN normal product coverage", () => {
       "Configured · unverified",
       "Partially configured",
       "Runtime health unavailable",
-      "Product status refresh incomplete"
+      "Product status refresh incomplete",
+      "ACTIVE",
+      "RESTART_REQUIRED",
+      "APPLY_FAILED",
+      "NOT_CONFIGURED",
+      "UNAVAILABLE",
+      "FALLBACK_ACTIVE",
+      "NONE",
+      "UNTIL",
+      "UNTIL_ENGAGEMENT",
+      "UNTIL_EXPLICIT_RESUME",
+      "Settings saved.",
+      "Secret updated."
     ]) {
       expect(zhCN[key], key).toBeTruthy();
     }
