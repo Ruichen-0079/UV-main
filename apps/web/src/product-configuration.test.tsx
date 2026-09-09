@@ -74,7 +74,8 @@ it("people surface hides raw identity fields and saves the primary profile witho
   });
   const node = await mount(["people", "voices"]);
   const text = readText(node);
-  for (const visible of ["My profile", "People I know", "Rui", "Ming", "Voice enrollment", "Re-enroll"]) expect(text).toContain(visible);
+  for (const visible of ["My profile", "People I know", "Ming", "Voice enrollment", "Re-enroll"]) expect(text).toContain(visible);
+  expect(nodes(node).filter(n => n.tagName === "INPUT").map(n => props(n).value)).toContain("Rui");
   for (const hidden of ["Current Yuvi persona", "Stable user ID", "This is my primary profile", "personaId"]) expect(text).not.toContain(hidden);
   await act(async () => props(nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Save my profile")!).onClick());
   const call = mock.request.mock.calls.find(c => c[0] === "/product/people" && c[1]?.method === "POST");
