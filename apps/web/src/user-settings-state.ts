@@ -1,3 +1,5 @@
+import { t } from "./locale.js";
+
 /**
  * Frontend DTO + reducer for Tauri user settings.
  * Secrets never appear as values — only configured flags.
@@ -126,18 +128,21 @@ export function buildSaveMessage(input: {
   supervisorSync?: SupervisorSyncStatusDto | null;
   kind?: "settings" | "secret";
 }): string {
-  const prefix = input.kind === "secret" ? "Secret updated" : "Settings saved";
+  const prefix = input.kind === "secret" ? t("Secret updated") : t("Settings saved");
   if (input.supervisorSync && !input.supervisorSync.applied) {
-    const savedPrefix = input.kind === "secret" ? "Secret saved" : "Settings saved";
-    return `${savedPrefix}, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.`;
+    const savedPrefix = input.kind === "secret" ? t("Secret saved") : t("Settings saved");
+    return t(
+      "{0}, but Supervisor was unavailable. Reopen YUVI or Save again to apply it to managed services.",
+      savedPrefix
+    );
   }
   if (input.restartServices.length > 0) {
     if (input.kind === "secret") {
-      return `${prefix}. Applying changes to: ${input.restartServices.join(", ")}.`;
+      return t("{0}. Applying changes to: {1}.", prefix, input.restartServices.join(", "));
     }
-    return `${prefix}. Services may reload: ${input.restartServices.join(", ")}.`;
+    return t("{0}. Services may reload: {1}.", prefix, input.restartServices.join(", "));
   }
-  return `${prefix}.`;
+  return t("{0}.", prefix);
 }
 
 export type UserSettingsForm = {
