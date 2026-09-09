@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { startResizeDragging, invoke } = vi.hoisted(() => ({
+const { startDragging, startResizeDragging, invoke } = vi.hoisted(() => ({
+  startDragging: vi.fn(),
   startResizeDragging: vi.fn(),
   invoke: vi.fn()
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ startResizeDragging })
+  getCurrentWindow: () => ({ startDragging, startResizeDragging })
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -14,6 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import {
   isTauriRuntime,
   preloadTauriWindowApi,
+  startWindowDragging,
   startWindowResizeDragging,
   controlCompanionWindow,
   controlWebUIWindow,
@@ -22,6 +24,7 @@ import {
 
 afterEach(() => {
   delete (globalThis as { window?: unknown }).window;
+  startDragging.mockClear();
   startResizeDragging.mockClear();
   invoke.mockClear();
 });
@@ -60,6 +63,19 @@ describe("isTauriRuntime", () => {
   it("is true when __TAURI_INTERNALS__ is present", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     expect(isTauriRuntime()).toBe(true);
+  });
+});
+
+describe("startWindowDragging", () => {
+  it("no-ops outside Tauri", async () => {
+    await expect(startWindowDragging()).resolves.toBeUndefined();
+    expect(startDragging).not.toHaveBeenCalled();
+  });
+
+  it("starts native dragging inside Tauri", async () => {
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    await startWindowDragging();
+    expect(startDragging).toHaveBeenCalledTimes(1);
   });
 });
 
