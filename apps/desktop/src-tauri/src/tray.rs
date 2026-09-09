@@ -17,6 +17,7 @@ const TRAY_SHOW_COMPANION: &str = "tray-show-companion";
 const TRAY_HIDE_COMPANION: &str = "tray-hide-companion";
 const TRAY_SHOW_SUBTITLE: &str = "tray-show-subtitle";
 const TRAY_HIDE_SUBTITLE: &str = "tray-hide-subtitle";
+const TRAY_UNLOCK_SUBTITLE: &str = "tray-unlock-subtitle";
 const TRAY_QUIT: &str = "tray-quit";
 
 /// A resolved tray intent. Surface intents carry one presentation command for
@@ -27,6 +28,7 @@ pub(crate) enum TrayCommand {
   Companion(SurfaceCommand),
   WebUI(SurfaceCommand),
   Subtitle(SurfaceCommand),
+  SubtitleUnlock,
   Quit,
 }
 
@@ -42,6 +44,7 @@ pub(crate) fn tray_command(id: &str) -> Option<TrayCommand> {
     TRAY_HIDE_COMPANION => Some(TrayCommand::Companion(SurfaceCommand::Hide)),
     TRAY_SHOW_SUBTITLE => Some(TrayCommand::Subtitle(SurfaceCommand::Show)),
     TRAY_HIDE_SUBTITLE => Some(TrayCommand::Subtitle(SurfaceCommand::Hide)),
+    TRAY_UNLOCK_SUBTITLE => Some(TrayCommand::SubtitleUnlock),
     TRAY_QUIT => Some(TrayCommand::Quit),
     _ => None,
   }
@@ -50,14 +53,21 @@ pub(crate) fn tray_command(id: &str) -> Option<TrayCommand> {
 /// Route one tray menu id. The `Quit` arm is the fork point: it calls the
 /// lifecycle hook and never constructs a surface dispatch, so the surface
 /// seam can never own exit.
-pub(crate) fn dispatch_tray_menu<S, Q>(id: &str, mut on_surface: S, mut on_quit: Q)
+pub(crate) fn dispatch_tray_menu<S, U, Q>(
+  id: &str,
+  mut on_surface: S,
+  mut on_subtitle_unlock: U,
+  mut on_quit: Q,
+)
 where
   S: FnMut(SurfaceId, SurfaceCommand),
+  U: FnMut(),
   Q: FnMut(),
 {
   let Some(command) = tray_command(id) else { return };
   match command {
     TrayCommand::Quit => on_quit(),
+    TrayCommand::SubtitleUnlock => on_subtitle_unlock(),
     TrayCommand::Main(command) => on_surface(SurfaceId::Main, command),
     TrayCommand::Companion(command) => on_surface(SurfaceId::Companion, command),
     TrayCommand::WebUI(command) => on_surface(SurfaceId::WebUI, command),
@@ -78,6 +88,8 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     MenuItem::with_id(app, TRAY_SHOW_SUBTITLE, "Show Subtitle", true, None::<&str>)?;
   let hide_subtitle_item =
     MenuItem::with_id(app, TRAY_HIDE_SUBTITLE, "Hide Subtitle", true, None::<&str>)?;
+  let unlock_subtitle_item =
+    MenuItem::with_id(app, TRAY_UNLOCK_SUBTITLE, "Unlock Subtitle", true, None::<&str>)?;
   let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>)?;
   let menu = Menu::with_items(
     app,
@@ -90,6 +102,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
       &hide_companion_item,
       &show_subtitle_item,
       &hide_subtitle_item,
+      &unlock_subtitle_item,
       &quit,
     ],
   )?;
@@ -110,6 +123,11 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             eprintln!("[yuvi-desktop] failed to dispatch tray surface command {surface:?} {command:?}: {error}");
           }
         },
+        || {
+          if let Err(error) = DesktopSurfaceManager::set_subtitle_locked(app, false) {
+            eprintln!("[yuvi-desktop] failed to unlock Subtitle from tray: {error}");
+          }
+        },
         || crate::request_app_exit(app),
       );
     })
@@ -123,7 +141,7 @@ mod tests {
   use super::{
     dispatch_tray_menu, tray_command, TRAY_HIDE_COMPANION, TRAY_HIDE_MAIN, TRAY_HIDE_SUBTITLE,
     TRAY_HIDE_WEBUI, TRAY_OPEN_MAIN, TRAY_OPEN_WEBUI, TRAY_QUIT, TRAY_SHOW_COMPANION,
-    TRAY_SHOW_SUBTITLE, TrayCommand,
+    TRAY_SHOW_SUBTITLE, TRAY_UNLOCK_SUBTITLE, TrayCommand,
   };
   use crate::desktop_surface::{SurfaceCommand, SurfaceId};
 
@@ -161,6 +179,10 @@ mod tests {
       tray_command(TRAY_HIDE_SUBTITLE),
       Some(TrayCommand::Subtitle(SurfaceCommand::Hide))
     );
+    assert_eq!(
+      tray_command(TRAY_UNLOCK_SUBTITLE),
+      Some(TrayCommand::SubtitleUnlock)
+    );
     assert_eq!(tray_command(TRAY_QUIT), Some(TrayCommand::Quit));
   }
 
@@ -170,15 +192,18 @@ mod tests {
   fn quit_forks_to_lifecycle_and_never_enters_the_surface_seam() {
     let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
     let mut quit_calls = 0;
+    let mut subtitle_unlocks = 0;
     dispatch_tray_menu(
       TRAY_QUIT,
       |surface, command| surface_dispatches.push((surface, command)),
+      || subtitle_unlocks += 1,
       || quit_calls += 1,
     );
     assert!(
       surface_dispatches.is_empty(),
       "Quit must bypass DesktopSurfaceManager"
     );
+    assert_eq!(subtitle_unlocks, 0);
     assert_eq!(quit_calls, 1);
   }
 
@@ -209,26 +234,48 @@ mod tests {
     for (id, expected) in cases {
       let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
       let mut quit_calls = 0;
+      let mut subtitle_unlocks = 0;
       dispatch_tray_menu(
         id,
         |surface, command| surface_dispatches.push((surface, command)),
+        || subtitle_unlocks += 1,
         || quit_calls += 1,
       );
       assert_eq!(quit_calls, 0, "{id} must not touch the lifecycle exit path");
+      assert_eq!(subtitle_unlocks, 0, "{id} must not touch Subtitle lock state");
       assert_eq!(surface_dispatches, vec![expected]);
     }
+  }
+
+  #[test]
+  fn subtitle_unlock_reaches_only_the_presentation_lock_path() {
+    let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
+    let mut subtitle_unlocks = 0;
+    let mut quit_calls = 0;
+    dispatch_tray_menu(
+      TRAY_UNLOCK_SUBTITLE,
+      |surface, command| surface_dispatches.push((surface, command)),
+      || subtitle_unlocks += 1,
+      || quit_calls += 1,
+    );
+    assert!(surface_dispatches.is_empty());
+    assert_eq!(subtitle_unlocks, 1);
+    assert_eq!(quit_calls, 0);
   }
 
   #[test]
   fn unknown_menu_ids_are_ignored_safely() {
     let mut surface_dispatches: Vec<(SurfaceId, SurfaceCommand)> = Vec::new();
     let mut quit_calls = 0;
+    let mut subtitle_unlocks = 0;
     dispatch_tray_menu(
       "tray-not-a-command",
       |surface, command| surface_dispatches.push((surface, command)),
+      || subtitle_unlocks += 1,
       || quit_calls += 1,
     );
     assert!(surface_dispatches.is_empty());
+    assert_eq!(subtitle_unlocks, 0);
     assert_eq!(quit_calls, 0);
   }
 }

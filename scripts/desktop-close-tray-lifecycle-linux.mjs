@@ -51,7 +51,7 @@ const POLL_INTERVAL_MS = 250;
 const MAIN_WINDOW_CAPTION = "YUVI Chat";
 const WEBUI_WINDOW_CAPTION = "YUVI WebUI";
 const SUBTITLE_WINDOW_CAPTION = "YUVI Subtitle";
-const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Open WebUI", "Hide WebUI", "Show Companion", "Hide Companion", "Show Subtitle", "Hide Subtitle", "Quit"];
+const MENU_LABELS = ["Open YUVI", "Hide YUVI", "Open WebUI", "Hide WebUI", "Show Companion", "Hide Companion", "Show Subtitle", "Hide Subtitle", "Unlock Subtitle", "Quit"];
 
 let tempRoot;
 let appChild = null;
