@@ -1949,12 +1949,25 @@ export class DesktopSupervisor {
             this.emit();
             return;
           }
-          if (svc.ownership === "owned" || svc.pid || svc.child) await this.stopOwned(svc);
-          svc.pendingExternal = false;
-          svc.status = "stopped";
-          svc.summary = "Local STT suspended by user.";
-          svc.detail = null;
-          svc.lastError = null;
+          await this.refreshService("local_stt");
+          if (svc.ownership === "owned" || svc.pid || svc.child) {
+            await this.stopOwned(svc);
+            await this.refreshService("local_stt");
+          }
+          if (svc.status === "stopped" && svc.ownership === "none") {
+            svc.pendingExternal = false;
+            svc.summary = "Local STT suspended by user.";
+            svc.detail = null;
+            svc.lastError = null;
+          } else {
+            svc.summary =
+              "Local STT remains suspended, but endpoint ownership requires reconciliation.";
+            svc.detail =
+              svc.ownership === "external"
+                ? "A non-owned process is still answering on the configured Local STT endpoint."
+                : svc.detail;
+            svc.lastError = null;
+          }
           this.emit();
           return;
         }
