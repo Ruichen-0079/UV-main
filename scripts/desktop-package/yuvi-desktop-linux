@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+self=$(readlink -f -- "$0")
+root=$(dirname -- "$self")
+systemctl --user start yuvi-daily.service
+export YUVI_DESKTOP_SUPERVISOR_BINDING=attach
+exec "$root/yuvi-desktop"

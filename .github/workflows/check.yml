@@ -40,6 +40,20 @@ jobs:
       - name: Ensure Cubism Framework dist
         run: pnpm prepare:cubism-framework
 
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libsecret-1-dev
+
+      - name: Tauri shell tests
+        run: cargo test --locked --lib --manifest-path apps/desktop/src-tauri/Cargo.toml
+
       - name: Type check
         run: pnpm check
 

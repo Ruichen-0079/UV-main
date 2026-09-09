@@ -5,6 +5,28 @@
 
 export const DEFAULT_RUNTIME_HTTP = "http://127.0.0.1:6121";
 
+let desktopRuntimeHttpOverride: string | null = null;
+
+export function setDesktopRuntimeHttpOverride(value: string | null): void {
+  if (value === null) {
+    desktopRuntimeHttpOverride = null;
+    return;
+  }
+  const parsed = new URL(value);
+  const host = parsed.hostname.toLowerCase();
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+  if (
+    parsed.protocol !== "http:" ||
+    !loopback ||
+    parsed.username ||
+    parsed.password ||
+    (parsed.pathname !== "/" && parsed.pathname !== "")
+  ) {
+    throw new Error("Desktop Runtime URL must be a loopback HTTP origin.");
+  }
+  desktopRuntimeHttpOverride = parsed.origin;
+}
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -23,7 +45,7 @@ export function resolveApiBaseUrl(
     return configured.replace(/\/$/, "");
   }
   if (isTauriRuntime()) {
-    return DEFAULT_RUNTIME_HTTP;
+    return desktopRuntimeHttpOverride ?? DEFAULT_RUNTIME_HTTP;
   }
   return "/api";
 }

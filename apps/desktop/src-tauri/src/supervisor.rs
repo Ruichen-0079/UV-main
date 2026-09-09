@@ -26,6 +26,7 @@ struct SupervisorInner {
   expected_pid: Option<u32>,
   repo_root: Option<PathBuf>,
   state_dir: Option<PathBuf>,
+  owns_supervisor_process: bool,
   poll_stop: bool,
   shutting_down: bool,
 }
@@ -84,6 +85,56 @@ pub fn push_runtime_config(
     Some(&body),
     Some(&token),
   )
+}
+
+pub(crate) fn attach_existing_requested() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    return std::env::var("YUVI_DESKTOP_SUPERVISOR_BINDING")
+      .ok()
+      .is_some_and(|value| value.trim().eq_ignore_ascii_case("attach"));
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    false
+  }
+}
+
+/// Linux release presentation mode: bind to the one Supervisor already owned by
+/// the launcher/systemd. This never spawns/adopts a process, pushes bootstrap
+/// configuration, or claims the Supervisor's pid/state files.
+pub(crate) fn attach_existing_supervisor(app: &AppHandle) -> Result<(), String> {
+  use crate::packaging::desktop_state_dir;
+
+  let root_state_dir = desktop_state_dir();
+  fs::create_dir_all(&root_state_dir).map_err(|error| error.to_string())?;
+  let pointer_path = root_state_dir.join("active-instance.json");
+  let (endpoint, instance_state_dir) = wait_for_attached_endpoint(
+    &root_state_dir,
+    &pointer_path,
+    Duration::from_secs(12),
+  )?;
+
+  {
+    let state = app.state::<SupervisorState>();
+    let mut guard = state
+      .inner
+      .lock()
+      .map_err(|_| "supervisor lock poisoned".to_string())?;
+    guard.child = None;
+    guard.base_url = Some(endpoint.base_url.clone());
+    guard.control_token = Some(endpoint.control_token.clone());
+    guard.instance_id = Some(endpoint.instance_id.clone());
+    guard.expected_pid = None;
+    guard.repo_root = None;
+    guard.state_dir = Some(instance_state_dir);
+    guard.owns_supervisor_process = false;
+    guard.poll_stop = false;
+    guard.shutting_down = false;
+  }
+
+  start_status_poller(app.clone());
+  Ok(())
 }
 
 pub fn bootstrap_supervisor(
@@ -280,6 +331,7 @@ pub fn bootstrap_supervisor(
     guard.expected_pid = Some(endpoint.pid);
     guard.repo_root = repo_root_for_state;
     guard.state_dir = Some(instance_state_dir);
+    guard.owns_supervisor_process = true;
     guard.poll_stop = false;
     guard.shutting_down = false;
   }
@@ -574,6 +626,74 @@ mod tests {
     path
   }
 
+  fn serve_snapshot(instance: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+      for stream in listener.incoming().take(8) {
+        if let Ok(mut stream) = stream {
+          let mut buf = [0u8; 1024];
+          let _ = stream.read(&mut buf);
+          let body = serde_json::json!({
+            "instanceId": instance,
+            "shuttingDown": false,
+            "services": [],
+            "updatedAt": "2026-09-09T00:00:00.000Z"
+          }).to_string();
+          let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = stream.write_all(response.as_bytes());
+          let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+      }
+    });
+    (port, handle)
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn attached_endpoint_binds_only_the_active_pointer_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let instance = "attached-inst";
+    let (port, _server) = serve_snapshot(instance);
+    let instance_dir = root.path().join(instance);
+    fs::create_dir_all(&instance_dir).unwrap();
+    let endpoint = write_endpoint(&instance_dir, std::process::id(), port, instance);
+    let pointer = root.path().join("active-instance.json");
+    fs::write(&pointer, serde_json::to_vec(&serde_json::json!({
+      "instanceId": instance,
+      "pid": std::process::id(),
+      "endpointFile": endpoint,
+    })).unwrap()).unwrap();
+    let (attached, state_dir) = super::wait_for_attached_endpoint(
+      root.path(), &pointer, Duration::from_secs(2)
+    ).expect("matching active Supervisor should attach");
+    assert_eq!(attached.instance_id, instance);
+    assert_eq!(attached.pid, std::process::id());
+    assert_eq!(state_dir, fs::canonicalize(instance_dir).unwrap());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn attached_endpoint_rejects_pointer_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let endpoint = outside.path().join("control-endpoint.json");
+    fs::write(&endpoint, "{}").unwrap();
+    let pointer = root.path().join("active-instance.json");
+    fs::write(&pointer, serde_json::to_vec(&serde_json::json!({
+      "instanceId": "foreign",
+      "pid": std::process::id(),
+      "endpointFile": endpoint,
+    })).unwrap()).unwrap();
+    let error = super::read_attached_endpoint(root.path(), &pointer)
+      .expect_err("pointer escape must fail closed");
+    assert!(error.contains("escaped"));
+  }
+
   #[cfg(unix)]
   #[test]
   fn wait_rejects_a_foreign_healthy_supervisor() {
@@ -737,6 +857,7 @@ pub fn shutdown_supervisor(app: &AppHandle) {
   let mut child = guard.child.take();
   let state_dir = guard.state_dir.clone();
   let expected_pid = guard.expected_pid;
+  let owns_supervisor_process = guard.owns_supervisor_process;
   guard.base_url = None;
   // Keep token only for the shutdown request below.
   drop(guard);
@@ -752,24 +873,25 @@ pub fn shutdown_supervisor(app: &AppHandle) {
     );
   }
 
-  // Belt-and-suspenders: Windows does not kill Node Runtime when Supervisor exits.
-  // Kill runtime.pid.json from this instance if still alive.
-  if let Some(dir) = state_dir.as_ref() {
-    force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
-    force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
-  }
+  if owns_supervisor_process {
+    // Only the Tauri instance that spawned the Supervisor may force its
+    // process tree or remove its shared ownership files.
+    if let Some(dir) = state_dir.as_ref() {
+      force_kill_pid_from_metadata(&dir.join("runtime.pid.json"));
+      force_kill_pid_from_metadata(&dir.join("mem0.pid.json"));
+    }
 
-  if let Some(child) = child.take() {
-    let _ = stop_supervisor_child_bounded(child);
-  } else if let Some(pid) = expected_pid {
-    force_kill_process_tree(pid);
-  }
+    if let Some(child) = child.take() {
+      let _ = stop_supervisor_child_bounded(child);
+    } else if let Some(pid) = expected_pid {
+      force_kill_process_tree(pid);
+    }
 
-  // Best-effort cleanup of active pointer + instance lock.
-  let root = crate::packaging::desktop_state_dir();
-  let _ = fs::remove_file(root.join("active-instance.json"));
-  let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
-  let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+    let root = crate::packaging::desktop_state_dir();
+    let _ = fs::remove_file(root.join("active-instance.json"));
+    let _ = fs::remove_file(root.join("tauri-bootstrap-ready.json"));
+    let _ = fs::remove_file(root.join("supervisor.instance.lock"));
+  }
 }
 
 /// Terminal shutdown of the owned supervisor child. Stages, all bounded:
@@ -1061,11 +1183,84 @@ fn require_endpoint(state: &State<'_, SupervisorState>) -> Result<(String, Strin
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ActivePointer {
-  #[allow(dead_code)]
   instance_id: String,
-  #[allow(dead_code)]
   pid: u32,
   endpoint_file: String,
+}
+
+fn read_attached_endpoint(
+  root_state_dir: &Path,
+  pointer_path: &Path,
+) -> Result<(EndpointFile, PathBuf), String> {
+  let pointer_text = fs::read_to_string(pointer_path)
+    .map_err(|error| format!("active Supervisor pointer unavailable: {error}"))?;
+  let pointer: ActivePointer = serde_json::from_str(&pointer_text)
+    .map_err(|error| format!("active Supervisor pointer invalid: {error}"))?;
+  let endpoint_path = PathBuf::from(&pointer.endpoint_file);
+  let root = fs::canonicalize(root_state_dir)
+    .map_err(|error| format!("Supervisor state root unavailable: {error}"))?;
+  let endpoint_path = fs::canonicalize(&endpoint_path)
+    .map_err(|error| format!("active Supervisor endpoint unavailable: {error}"))?;
+  if !endpoint_path.starts_with(&root) {
+    return Err("active Supervisor endpoint escaped the configured state root".to_string());
+  }
+  let endpoint_text = fs::read_to_string(&endpoint_path)
+    .map_err(|error| format!("active Supervisor endpoint unreadable: {error}"))?;
+  let endpoint: EndpointFile = serde_json::from_str(&endpoint_text)
+    .map_err(|error| format!("active Supervisor endpoint invalid: {error}"))?;
+  if endpoint.instance_id != pointer.instance_id || endpoint.pid != pointer.pid {
+    return Err("active Supervisor pointer identity mismatch".to_string());
+  }
+  if !endpoint_host_is_loopback(&endpoint.host) {
+    return Err("active Supervisor endpoint is not loopback".to_string());
+  }
+  let parsed = url::Url::parse(&endpoint.base_url)
+    .map_err(|_| "active Supervisor base URL is invalid".to_string())?;
+  if parsed.scheme() != "http"
+    || !endpoint_host_is_loopback(parsed.host_str().unwrap_or_default())
+    || parsed.port_or_known_default() != Some(endpoint.port)
+  {
+    return Err("active Supervisor base URL does not match its loopback endpoint".to_string());
+  }
+  if !process_alive(endpoint.pid) {
+    return Err("active Supervisor pid is not running".to_string());
+  }
+  if endpoint.control_token.len() < 32 {
+    return Err("active Supervisor control token is invalid".to_string());
+  }
+  let snapshot = http_json_with_timeout(
+    "GET",
+    &format!("{}/v1/status", endpoint.base_url),
+    None,
+    Some(&endpoint.control_token),
+    Duration::from_secs(1),
+  )
+  .map_err(|error| format!("active Supervisor status unavailable: {error}"))?;
+  if snapshot.get("instanceId").and_then(Value::as_str) != Some(endpoint.instance_id.as_str()) {
+    return Err("active Supervisor status identity mismatch".to_string());
+  }
+  let instance_state_dir = endpoint_path
+    .parent()
+    .map(Path::to_path_buf)
+    .ok_or_else(|| "active Supervisor endpoint has no state directory".to_string())?;
+  Ok((endpoint, instance_state_dir))
+}
+
+fn wait_for_attached_endpoint(
+  root_state_dir: &Path,
+  pointer_path: &Path,
+  timeout: Duration,
+) -> Result<(EndpointFile, PathBuf), String> {
+  let started = std::time::Instant::now();
+  let mut last_error = "active Supervisor is not ready".to_string();
+  while started.elapsed() < timeout {
+    match read_attached_endpoint(root_state_dir, pointer_path) {
+      Ok(endpoint) => return Ok(endpoint),
+      Err(error) => last_error = error,
+    }
+    thread::sleep(Duration::from_millis(200));
+  }
+  Err(format!("desktop shell could not attach to the active Supervisor: {last_error}"))
 }
 
 /// Bind discovery to the Supervisor child this desktop just spawned.

@@ -13,6 +13,9 @@ test("linux daily prepare packages the Local STT sidecar instead of adapter sour
   assert.match(source, /buildPackagedLocalStt/);
   assert.match(source, /genericLocalSttWeightsBundled: true/);
   assert.match(source, /local-stt-sidecar/);
+  assert.match(source, /tauri-desktop-shell/);
+  assert.match(source, /YUVI_LINUX_DESKTOP_BINARY/);
+  assert.match(source, /yuvi-desktop-launcher/);
   assert.equal(
     source.includes('copyTreeFiltered(path.join(REPO_ROOT, "services", "local-stt")'),
     false
@@ -27,6 +30,8 @@ test("linux daily installer leaves packaged Local STT stopped without a route", 
   assert.match(source, /local-stt", "yuvi-local-stt"/);
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
   assert.match(source, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
+  assert.match(source, /yuvi-desktop-launcher/);
+  assert.doesNotMatch(source, /Exec=xdg-open/);
 });
 
 test("SenseVoice license files are present for redistribution", () => {
@@ -69,6 +74,13 @@ test(
         mode: 0o755
       });
       fs.writeFileSync(path.join(resource, "local-stt", "local-stt-manifest.json"), "{}\n");
+      fs.mkdirSync(path.join(resource, "desktop"), { recursive: true });
+      fs.writeFileSync(path.join(resource, "desktop", "yuvi-desktop"), "ELF\n", { mode: 0o755 });
+      fs.writeFileSync(
+        path.join(resource, "desktop", "yuvi-desktop-launcher"),
+        "#!/bin/sh\nexit 0\n",
+        { mode: 0o755 }
+      );
       fs.copyFileSync(
         path.join(root, "scripts/desktop-package/install-linux-daily.mjs"),
         path.join(resource, "install-linux-daily.mjs")
@@ -98,6 +110,12 @@ test(
       assert.match(unit, /YUVI_AUTOSTART_LOCAL_STT=0/);
       assert.match(unit, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
       assert.doesNotMatch(unit, /YUVI_LOCAL_STT_START_COMMAND/);
+      const desktopEntry = fs.readFileSync(
+        path.join(home, "data/applications/yuvi-daily.desktop"),
+        "utf8"
+      );
+      assert.match(desktopEntry, /yuvi-desktop-launcher/);
+      assert.doesNotMatch(desktopEntry, /xdg-open/);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

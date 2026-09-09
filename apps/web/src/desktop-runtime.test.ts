@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow }));
 
 import {
   DEFAULT_RUNTIME_HTTP,
+  setDesktopRuntimeHttpOverride,
   resolveApiBaseUrl,
   resolveRuntimeAssetUrl,
   resolveDesktopSurface
@@ -15,6 +16,7 @@ import {
 
 describe("desktop-runtime API base", () => {
   afterEach(() => {
+    setDesktopRuntimeHttpOverride(null);
     vi.unstubAllGlobals();
     getCurrentWindow.mockReset();
   });
@@ -27,6 +29,19 @@ describe("desktop-runtime API base", () => {
   it("uses loopback Runtime inside Tauri when env unset", () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     expect(resolveApiBaseUrl({})).toBe(DEFAULT_RUNTIME_HTTP);
+  });
+
+  it("uses the attached Supervisor Runtime URL inside Tauri", () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    setDesktopRuntimeHttpOverride("http://127.0.0.1:16121/");
+    expect(resolveApiBaseUrl({})).toBe("http://127.0.0.1:16121");
+    expect(resolveRuntimeAssetUrl("/api/live2d/Lumi/Lumi.model3.json")).toBe(
+      "http://127.0.0.1:16121/live2d/Lumi/Lumi.model3.json"
+    );
+  });
+
+  it("rejects non-loopback desktop Runtime URLs", () => {
+    expect(() => setDesktopRuntimeHttpOverride("https://example.com:6121")).toThrow(/loopback/);
   });
 
   it("prefers explicit VITE_API_BASE_URL", () => {
@@ -56,6 +71,7 @@ describe("desktop-runtime API base", () => {
 
 describe("desktop surface routing", () => {
   afterEach(() => {
+    setDesktopRuntimeHttpOverride(null);
     vi.unstubAllGlobals();
     getCurrentWindow.mockReset();
   });

@@ -960,7 +960,7 @@ export type MemoryVectorIndexStatus = {
   annAccelerationActive: boolean;
 };
 
-const apiBaseUrl = resolveApiBaseUrl();
+const apiBaseUrl = (): string => resolveApiBaseUrl();
 const explicitWebSocketBaseUrl = import.meta.env["VITE_WS_BASE_URL"] as string | undefined;
 let dashboardDevToken = "";
 
@@ -1624,7 +1624,7 @@ async function streamTextResponse(
   if (options.signal) {
     requestInit.signal = options.signal;
   }
-  const response = await fetch(`${apiBaseUrl}${path}`, requestInit);
+  const response = await fetch(`${apiBaseUrl()}${path}`, requestInit);
 
   if (!response.ok) {
     throw new ApiError(await safeHttpStreamError(response), response.status);
@@ -1697,7 +1697,7 @@ async function streamProactiveLive(
   const requestInit: RequestInit = { method: "GET", headers };
   if (options.signal) requestInit.signal = options.signal;
   const response = await fetch(
-    `${apiBaseUrl}/v1/proactive-turns/live?sessionId=${encodeURIComponent(sessionId)}`,
+    `${apiBaseUrl()}/v1/proactive-turns/live?sessionId=${encodeURIComponent(sessionId)}`,
     requestInit
   );
   if (!response.ok) {
@@ -1745,7 +1745,7 @@ async function streamProactiveTextResponse(
     body: JSON.stringify(input)
   };
   if (options.signal) requestInit.signal = options.signal;
-  const response = await fetch(`${apiBaseUrl}/v1/proactive-turns/stream`, requestInit);
+  const response = await fetch(`${apiBaseUrl()}/v1/proactive-turns/stream`, requestInit);
 
   if (!response.ok) {
     throw await createHttpStreamError(response);
@@ -1867,7 +1867,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("authorization", `Bearer ${dashboardDevToken}`);
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
     ...init,
     headers
   });
@@ -1971,8 +1971,9 @@ function getWebSocketUrl(path: string): string {
     return `${explicitWebSocketBaseUrl.replace(/\/$/, "")}${path}`;
   }
 
-  if (apiBaseUrl.startsWith("http://") || apiBaseUrl.startsWith("https://")) {
-    return `${apiBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}${path}`;
+  const base = apiBaseUrl();
+  if (base.startsWith("http://") || base.startsWith("https://")) {
+    return `${base.replace(/^http/, "ws").replace(/\/$/, "")}${path}`;
   }
 
   // Browser/dev behind Vite proxy: prefer same-host WS via Runtime port.
@@ -1985,7 +1986,7 @@ function getWebSocketUrl(path: string): string {
 }
 
 export async function productSample(id: string): Promise<Blob> {
- const response = await fetch(`${apiBaseUrl}/product/voice-samples/${encodeURIComponent(id)}`, { headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {} });
+ const response = await fetch(`${apiBaseUrl()}/product/voice-samples/${encodeURIComponent(id)}`, { headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {} });
  if (!response.ok) throw new Error("Sample unavailable.");
  return response.blob();
 }
