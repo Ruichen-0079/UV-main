@@ -12,7 +12,6 @@ vi.mock("./api/client.js", () => ({
   request: async () => { throw new Error("No connection"); },
   productSample: vi.fn(),
   apiClient: {
-    getLive2DModels: async () => ({ models: [], activeId: null, activeUrl: null }),
     getRuntimeSettings: async () => state.settings,
     getProviderStatus: async () => ({ providers: {}, routes: {} }),
     getEvents: async () => [],
@@ -22,7 +21,15 @@ vi.mock("./api/client.js", () => ({
   }
 }));
 vi.mock("./App.js", () => ({ App: () => <div>Developer dashboard</div> }));
-vi.mock("./pages/settings-page.js", () => ({ SettingsPage: () => <div>Runtime settings</div> }));
+vi.mock("./tauri-window.js", () => ({ isTauriRuntime: () => true }));
+vi.mock("./locale-selector.js", () => ({ LocaleSelector: () => <div>Locale controls</div> }));
+vi.mock("./product-live2d-models.js", () => ({ ProductLive2DModels: () => <div>Live2D controls</div> }));
+vi.mock("./product-memory-settings.js", () => ({ ProductMemorySettings: () => <div>Memory connection</div> }));
+vi.mock("./product-configuration.js", () => ({
+  ProductConfigurationPanel: ({ sections }: { sections?: readonly string[] }) => (
+    <div>Configuration sections: {(sections ?? ["all"]).join(",")}</div>
+  )
+}));
 vi.mock("./user-settings-panel.js", () => ({
   UserSettingsPanel: () => <div>Desktop settings</div>
 }));
@@ -57,22 +64,40 @@ async function mount(element: JSX.Element) {
   return dom.container;
 }
 describe("Product WebUI integration", () => {
-  it("keeps current settings and Developer reachable from the product shell", async () => {
+  it("separates daily-use concerns while keeping advanced and Developer reachable", async () => {
     const { ProductWebUI } = await import("./product-webui.js");
     const node = await mount(<ProductWebUI />);
-    await act(async () => click(button(node, "Settings")));
-    expect(readText(node)).toContain("Runtime settings");
+
+    await act(async () => click(button(node, "Models")));
+    expect(readText(node)).toContain("Configuration sections: models");
+    expect(readText(node)).not.toContain("Configuration sections: people,voices");
+
+    await act(async () => click(button(node, "People & Memory")));
+    expect(readText(node)).toContain("Configuration sections: people,voices");
+    expect(readText(node)).not.toContain("Configuration sections: models");
+
+    await act(async () => click(button(node, "Appearance")));
+    expect(readText(node)).toContain("Locale controls");
+    expect(readText(node)).toContain("Live2D controls");
+
+    await act(async () => click(button(node, "Advanced settings")));
+    expect(readText(node)).toContain("Configuration sections: status,providers,routes,proactive");
     expect(readText(node)).toContain("Desktop settings");
+
     await act(async () => click(button(node, "Developer")));
     expect(readText(node)).toContain("Developer dashboard");
     await act(async () => click(button(node, "← Product WebUI")));
     expect(readText(node)).toContain("Daily control surface");
   });
-  it.each(["models", "routing"])("redirects %s to the shared configuration authority", async view => {
+
+  it.each([
+    ["models", "models"],
+    ["routing", "routes"]
+  ])("scopes the legacy %s wrapper to one shared configuration section", async (view, expected) => {
     const { ProductModelsProviders } = await import("./product-models-providers.js");
     const { ProductAIRouting } = await import("./product-ai-routing.js");
     const node = await mount(view === "models" ? <ProductModelsProviders /> : <ProductAIRouting />);
-    expect(readText(node)).toContain("Provider → Model → Capability Route");
+    expect(readText(node)).toContain(`Configuration sections: ${expected}`);
     expect(state.update).not.toHaveBeenCalled();
     expect(state.reload).not.toHaveBeenCalled();
   });
