@@ -61,4 +61,3 @@ export const productDestinations: { id: ProductView; label: string; description:
     group: "System"
   }
 ];
-
