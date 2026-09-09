@@ -22,6 +22,14 @@ export type SupervisorSnapshotDto = {
   updatedAt: string;
 };
 
+export type DesktopRuntimeBindingDto = {
+  mode: "attach" | "owned";
+  ready: boolean;
+  instanceId: string | null;
+  runtimeUrl: string | null;
+  error: string | null;
+};
+
 type StatusHandlers = {
   onSnapshot(snapshot: SupervisorSnapshotDto): void;
   onConnected(instanceId: string): void;
@@ -123,6 +131,18 @@ export function subscribeServiceStatus(
   };
 }
 
+export async function getDesktopRuntimeBinding(): Promise<DesktopRuntimeBindingDto | null> {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return parseDesktopRuntimeBinding(await invoke<unknown>("get_desktop_runtime_binding"));
+}
+
+export async function retryDesktopRuntimeBinding(): Promise<DesktopRuntimeBindingDto | null> {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return parseDesktopRuntimeBinding(await invoke<unknown>("retry_desktop_runtime_binding"));
+}
+
 export async function getServiceStatus(): Promise<SupervisorSnapshotDto | null> {
   if (isTauriRuntime()) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -195,6 +215,23 @@ export function subscribeServiceStatusState(
     },
     options
   );
+}
+
+export function parseDesktopRuntimeBinding(value: unknown): DesktopRuntimeBindingDto | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const mode = record["mode"];
+  const ready = record["ready"];
+  const instanceId = nullableBindingString(record["instanceId"]);
+  const runtimeUrl = nullableBindingString(record["runtimeUrl"]);
+  const error = nullableBindingString(record["error"]);
+  if ((mode !== "attach" && mode !== "owned") || typeof ready !== "boolean") return null;
+  if (ready && (!instanceId || !runtimeUrl)) return null;
+  return { mode, ready, instanceId, runtimeUrl, error };
+}
+
+function nullableBindingString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 export function parseSupervisorSnapshot(value: unknown): SupervisorSnapshotDto | null {
