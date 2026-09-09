@@ -361,10 +361,15 @@ impl DesktopSurfaceManager {
       return;
     };
     let previous = read_companion_window_geometry(&path);
-    let position = window.outer_position().ok();
+    let (x, y) = match window.outer_position() {
+      Ok(position) => (Some(position.x), Some(position.y)),
+      Err(_) => previous
+        .map(|value| (value.x, value.y))
+        .unwrap_or((None, None)),
+    };
     let geometry = CompanionWindowGeometry {
-      x: position.map(|value| value.x).or_else(|| previous.and_then(|value| value.x)),
-      y: position.map(|value| value.y).or_else(|| previous.and_then(|value| value.y)),
+      x,
+      y,
       width: size.width,
       height: size.height,
     };
