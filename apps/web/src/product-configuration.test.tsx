@@ -30,8 +30,10 @@ it("first-run controls work with no Chat; compatible route assignment saves then
   expect(readText(node)).toContain("RESTART_REQUIRED"); expect(readText(node)).toContain("Effective: None"); expect(props(button).disabled).toBe(false);
   const stt = nodes(node).find(n => n.attributes["aria-label"] === "STT route")!; expect(nodes(stt).filter(n => n.tagName === "OPTION").map(readText)).toEqual(["Select model"]);
 });
-it("sectioned presentation hides unrelated controls and avoids irrelevant voice work", async () => {
-  mock.request.mockImplementation(async () => snapshot());
+it("sectioned presentation hides unrelated controls and loads voice state only when it becomes visible", async () => {
+  mock.request.mockImplementation(async url => url === "/product/voices"
+    ? { available: false, voices: [], unknown: [] }
+    : snapshot());
   const node = await mount(["models"]);
   const text = readText(node);
   expect(text).toContain("Models");
@@ -40,6 +42,12 @@ it("sectioned presentation hides unrelated controls and avoids irrelevant voice 
   expect(text).not.toContain("My Profile");
   expect(text).not.toContain("Voice Profiles");
   expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(false);
+
+  await act(async () => {
+    root!.render(<StrictMode><ProductConfigurationPanel sections={["people", "voices"]} /></StrictMode>);
+  });
+  expect(mock.request.mock.calls.some(c => c[0] === "/product/voices")).toBe(true);
+  expect(readText(node)).toContain("Voice Profiles");
 });
 it("fallback order edits are stable and bounded", () => { expect(reorderRoute(["a", "b", "c"], 1, -1)).toEqual(["b", "a", "c"]); expect(reorderRoute(["a"], 0, -1)).toEqual(["a"]); });
 it("unknown voice offers local playback, explicit link, creation, leave unresolved and deletion", async () => {
