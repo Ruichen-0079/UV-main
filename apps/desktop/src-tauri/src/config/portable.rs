@@ -20,7 +20,6 @@ pub(super) fn validate(settings: &UserSettings) -> Result<(), String> {
         || settings.runtime.mode != ServiceMode::Managed
         || (settings.memory.enabled && settings.memory.mode != ServiceMode::Managed)
         || (settings.stt.provider == SttProvider::Local && settings.stt.mode != ServiceMode::Managed)
-        || settings.tts.enabled
     {
         return Err("Portable requires its own managed service endpoints; external local services and unbundled local TTS are unavailable.".into());
     }

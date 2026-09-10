@@ -14,11 +14,49 @@ const runtimePort=Number(arg("runtime-port","6121"));
 const statusPath="/yuvi-daily/status";
 const TYPES={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".json":"application/json",".svg":"image/svg+xml",".png":"image/png",".woff2":"font/woff2",".ttf":"font/ttf",".map":"application/json"};
 const xdg=()=>{const v=process.env.XDG_DATA_HOME;return v&&path.isAbsolute(v)?v:path.join(process.env.HOME||"",".local/share")};
-async function dailyStatus(res){res.setHeader("Cache-Control","no-store");res.setHeader("Content-Type","application/json");try{const pointer=JSON.parse(fs.readFileSync(path.join(process.env.YUVI_SUPERVISOR_STATE_ROOT || path.join(xdg(),"YUVI/DesktopSupervisor"),"active-instance.json"),"utf8"));const endpoint=JSON.parse(fs.readFileSync(pointer.endpointFile,"utf8"));if(endpoint.host!=="127.0.0.1"||!Number.isInteger(endpoint.port)||endpoint.port<1||endpoint.port>65535||endpoint.instanceId!==pointer.instanceId||typeof endpoint.controlToken!=="string")throw new Error("bad");const response=await fetch("http://127.0.0.1:"+endpoint.port+"/v1/status",{headers:{"x-yuvi-control-token":endpoint.controlToken},signal:AbortSignal.timeout(3000),redirect:"error"});if(!response.ok)throw new Error("unavail");const snapshot=await response.json();if(snapshot.instanceId!==pointer.instanceId)throw new Error("stale");res.end(JSON.stringify({checkedAt:new Date().toISOString(),services:(snapshot.services||[]).map(s=>({id:s.id,status:s.status,managed:s.ownership==="owned"||s.ownership==="managed"}))}));}catch{res.statusCode=503;res.end(JSON.stringify({error:"Supervisor status unavailable"}));}}
-function proxy(req,res,targetPath){const upstream=http.request({hostname:runtimeHost,port:runtimePort,path:targetPath,method:req.method,headers:{...req.headers,host:runtimeHost+":"+runtimePort}},up=>{res.writeHead(up.statusCode||502,up.headers);up.pipe(res);});upstream.on("error",()=>{res.statusCode=502;res.end("Bad Gateway")});req.pipe(upstream);}
+async function supervisorSnapshot() {
+  const stateRoot = process.env.YUVI_SUPERVISOR_STATE_ROOT || path.join(xdg(), "YUVI/DesktopSupervisor");
+  const pointer = JSON.parse(fs.readFileSync(path.join(stateRoot, "active-instance.json"), "utf8"));
+  const expectedPid = process.env.YUVI_EXPECTED_SUPERVISOR_PID;
+  if (expectedPid && pointer.pid !== Number(expectedPid)) throw new Error("foreign Supervisor");
+  if (!path.resolve(pointer.endpointFile).startsWith(path.resolve(stateRoot) + path.sep)) throw new Error("foreign endpoint");
+  const endpoint = JSON.parse(fs.readFileSync(pointer.endpointFile, "utf8"));
+  if (endpoint.host !== "127.0.0.1" || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 || endpoint.instanceId !== pointer.instanceId || endpoint.pid !== pointer.pid || typeof endpoint.controlToken !== "string") throw new Error("invalid identity");
+  const response = await fetch(`http://127.0.0.1:${endpoint.port}/v1/status`, { headers: { "x-yuvi-control-token": endpoint.controlToken }, signal: AbortSignal.timeout(3000), redirect: "error" });
+  if (!response.ok) throw new Error("unavailable");
+  const snapshot = await response.json();
+  if (snapshot.instanceId !== pointer.instanceId) throw new Error("stale identity");
+  return snapshot;
+}
+async function dailyStatus(res) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "application/json");
+  try {
+    const snapshot = await supervisorSnapshot();
+    res.end(JSON.stringify({ checkedAt: new Date().toISOString(), services: (snapshot.services || []).map(s => ({ id: s.id, status: s.status, managed: s.ownership === "owned" || s.ownership === "managed" })) }));
+  } catch {
+    res.statusCode = 503;
+    res.end(JSON.stringify({ error: "Supervisor status unavailable" }));
+  }
+}
+// Portable forwarding consumes the existing Supervisor projection on each request.
+// It neither probes Runtime nor starts/restarts any service.
+async function runtimeBound() {
+  if (!process.env.YUVI_PORTABLE_VERSION) return true;
+  try {
+    if (!process.env.YUVI_EXPECTED_SUPERVISOR_PID) return false;
+    const snapshot = await supervisorSnapshot();
+    const runtime = snapshot.services?.find(s => s.id === "runtime");
+    return runtime?.ownership === "owned" && runtime.status === "healthy"
+      && runtime.url === `http://${runtimeHost}:${runtimePort}/health`;
+  } catch { return false; }
+}
+
+async function proxy(req,res,targetPath){if(!await runtimeBound()){res.statusCode=503;res.end("Portable Runtime is not ready in its Supervisor.");return;}const upstream=http.request({hostname:runtimeHost,port:runtimePort,path:targetPath,method:req.method,headers:{...req.headers,host:runtimeHost+":"+runtimePort}},up=>{res.writeHead(up.statusCode||502,up.headers);up.pipe(res);});upstream.on("error",()=>{res.statusCode=502;res.end("Bad Gateway")});req.pipe(upstream);}
 function safeJoin(base,reqPath){const decoded=decodeURIComponent((reqPath||"/").split("?")[0]);const joined=path.normalize(path.join(base,decoded==="/"?"index.html":decoded));return joined.startsWith(base)?joined:null;}
 function rejectUpgrade(socket,status,text){if(socket.destroyed)return;socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);}
-function proxyUpgrade(req,socket,head){
+async function proxyUpgrade(req,socket,head){
+  if(!await runtimeBound()){rejectUpgrade(socket,503,"Service Unavailable");return;}
   const url=req.url||"";
   if(url!=="/ws"&&!url.startsWith("/ws?")){rejectUpgrade(socket,404,"Not Found");return;}
   const upstream=net.connect({host:runtimeHost,port:runtimePort});

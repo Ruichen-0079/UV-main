@@ -1315,3 +1315,15 @@ fn capability_preferences_never_override_provider_registry_tts_selection() {
         }
     }
 }
+
+#[test]
+fn portable_tts_preference_does_not_disable_product_remote_providers() {
+    let mut settings = UserSettings::default();
+    super::portable::rebase_endpoints(&mut settings);
+    settings.tts.enabled = true;
+    assert!(super::portable::validate(&settings).is_ok());
+    settings.tts.mode = ServiceMode::Managed;
+    assert!(super::portable::validate(&settings).is_ok());
+    settings.tts.wrapper_url = "http://127.0.0.1:9881".into();
+    assert!(super::portable::validate(&settings).is_err());
+}

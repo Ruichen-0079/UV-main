@@ -118,12 +118,10 @@ try {
     const controlDeadline = Date.now() + 25_000;
     while (!closing) {
       try {
-        const status = await control('/v1/status');
-        const runtime = status.services.find(s => s.id === 'runtime');
-        if (runtime?.ownership === 'external') throw new Error('Runtime port belongs to another instance.');
+        await control('/v1/status');
         break;
       } catch (error) {
-        if (error.message.includes('another instance')) { stop(); throw error; }
+        // Wait only for the authenticated control plane of our child.
       }
       if (Date.now() >= controlDeadline) { stop(); throw new Error('Supervisor control plane did not become ready.'); }
       await new Promise(r => setTimeout(r, 250));
@@ -134,25 +132,10 @@ try {
       desktop.once('error', stop); desktop.once('exit', stop);
     }
 
-    // The attached desktop now pushes Product config + private secret and sequences
-    // PostgreSQL -> migrations -> Mem0 -> Runtime through the existing Supervisor.
-    // Cover the existing Desktop PG (35s), Mem0 (90s), Runtime (45s) budgets.
-    const runtimeDeadline = Date.now() + 180_000;
-    while (!closing) {
-      try {
-        const status = await control('/v1/status');
-        const runtime = status.services.find(s => s.id === 'runtime');
-        if (runtime?.ownership === 'external') throw new Error('Runtime port belongs to another instance.');
-        if (runtime?.status === 'healthy' && runtime.ownership === 'owned') break;
-      } catch (error) {
-        if (error.message.includes('another instance')) { stop(); throw error; }
-      }
-      if (Date.now() >= runtimeDeadline) { stop(); throw new Error('Runtime did not become ready after durable Memory bootstrap. Inspect the portable DATA instances logs.'); }
-      await new Promise(r => setTimeout(r, 250));
-    }
-
+    // Desktop sequences bootstrap; Supervisor owns service readiness and failure.
+    // Static presentation can start immediately and consumes that ownership truth.
     if (!closing) {
-      web = spawn(node, [path.join(root, 'web', 'static-server.mjs'), '--root', path.join(root, 'web', 'dist'), '--port', String(webPort), '--runtime-port', String(runtimePort)], { cwd: state, env, stdio: 'inherit' });
+      web = spawn(node, [path.join(root, 'web', 'static-server.mjs'), '--root', path.join(root, 'web', 'dist'), '--port', String(webPort), '--runtime-port', String(runtimePort)], { cwd: state, env: { ...env, YUVI_EXPECTED_SUPERVISOR_PID: String(expectedSupervisorPid) }, stdio: 'inherit' });
       web.once('error', stop); web.once('exit', stop);
       console.log(`YUVI desktop shell started. Browser fallback: http://127.0.0.1:${webPort}/#/webui\nRun ./yuvi stop to shut down.`);
     }

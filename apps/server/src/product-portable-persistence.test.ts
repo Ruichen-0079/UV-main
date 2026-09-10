@@ -56,6 +56,8 @@ it("Portable rejects persisted Installed STT/TTS endpoints while retaining remot
   expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
   settings.configuration.providers = [{id: "tts", displayName: "Local", adapter: "gpt-sovits", baseUrl: "http://127.0.0.1:9881"}];
   expect(() => productEnvironment(env, settings)).toThrow("owned local TTS");
+  settings.configuration.providers[0]!.baseUrl = "https://tts.example.test";
+  expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
   expect(productEnvironment({}, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
 });
 
