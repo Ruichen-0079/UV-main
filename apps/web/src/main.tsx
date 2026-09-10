@@ -20,6 +20,7 @@ import {
 } from "./desktop-runtime.js";
 import "./styles.css";
 import "./product-ui.css";
+import "./typography.css";
 
 /**
  * Lightweight surface routing for the desktop split.
