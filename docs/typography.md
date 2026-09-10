@@ -13,7 +13,7 @@ YUVI Product surfaces use one offline typography contract. The intent is consist
 
 Noto Sans Mono's upstream source repository records the 2.014 source revision, while the actual redistributable TTF consumed by A11 is pinned to the verified `google/fonts` distribution snapshot that maps that upstream file into `ofl/notosansmono`. This keeps the binary URL immutable and directly verifiable instead of assuming the upstream source tree stores generated binaries.
 
-The source URLs and license URLs are pinned in `scripts/prepare-product-fonts.mjs`. Generated font binaries are not committed to the source repository. A Web build prepares them under `apps/web/public/yuvi-fonts/`, validates their OpenType signature and expected minimum size, validates representative glyph coverage from the font `cmap`, and writes `fonts-manifest.json` with distribution/source revisions, exact byte count and SHA-256 of every bundled font.
+The source URLs and license URLs are pinned in `scripts/prepare-product-fonts.mjs`. Generated font binaries are not committed to the source repository. A Web build prepares them under `apps/web/public/yuvi-fonts/`, validates their exact pinned byte size, OpenType signature and representative glyph coverage from the font `cmap`, and writes `fonts-manifest.json` with distribution/source revisions, exact byte count and SHA-256 of every bundled font.
 
 The preparation step may fetch the pinned upstream/distribution resources while constructing an artifact. **The running YUVI product never fetches fonts from the network.** CSS references only local `/yuvi-fonts/...` assets. There is no Google Fonts stylesheet, CDN dependency, Microsoft font, Segoe-only requirement or other proprietary operating-system font dependency in the active typography contract.
 
@@ -51,7 +51,7 @@ The public-artifact audit verifies:
 4. total measured font bytes match `fontBytes`;
 5. the package `install-manifest.json` declares `typographyBundled=true`, `typographyRuntimeNetworkFetch=false`, the expected families and the same exact `typographyFontBytes` total.
 
-`typographyFontBytes` is the authoritative package-size impact of the two font binaries. It is generated from the actual pinned files rather than estimated in documentation, so release evidence remains valid if the pinned font payload is intentionally changed in a later atom.
+The pinned A11 font binaries are 17,773,132 bytes (Noto Sans SC) plus 1,708,408 bytes (Noto Sans Mono), for **19,481,540 bytes** of raw font payload before archive compression. `typographyFontBytes` is still the release authority: it is generated from the actual prepared files and cross-checked by the public-artifact audit rather than trusting this documentation value.
 
 ## Acceptance matrix
 
