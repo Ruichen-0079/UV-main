@@ -154,6 +154,57 @@ describe("durable Live2D models", () => {
     ).toThrow("Unsafe ZIP entry path");
   });
 
+  it("rejects ZIPs with no model manifest and malformed archive bytes", async () => {
+    const noManifest = zipFixture({ "README.txt": "no model here" });
+    expect(() =>
+      modelPackageFromZip({ name: "missing", archiveBase64: noManifest.toString("base64") })
+    ).toThrow("no .model3.json");
+
+    const dir = await root();
+    const app = Fastify();
+    await registerLive2DRoutes(app, { live2dModelsRoot: dir } as never);
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/live2d/models/import-zip",
+      payload: { name: "broken", archiveBase64: Buffer.from("not a zip").toString("base64") }
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect((await app.inject("/live2d/models")).json().models).toEqual([]);
+    await app.close();
+  });
+
+  it("allows repeated ZIP import as independent copies and activates the newest copy", async () => {
+    const dir = await root();
+    const app = Fastify();
+    await registerLive2DRoutes(app, { live2dModelsRoot: dir } as never);
+    const archiveBase64 = vtsZipFixture().toString("base64");
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/live2d/models/import-zip",
+      payload: { name: "Lumi first", archiveBase64 }
+    });
+    expect(first.statusCode).toBe(200);
+    const firstState = first.json();
+    const firstId = firstState.activeId;
+    expect(firstId).toBeTruthy();
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/live2d/models/import-zip",
+      payload: { name: "Lumi second", archiveBase64 }
+    });
+    expect(second.statusCode).toBe(200);
+    const secondState = second.json();
+    expect(secondState.activeId).toBeTruthy();
+    expect(secondState.activeId).not.toBe(firstId);
+    expect(secondState.models.filter((model: any) => model.source === "user")).toHaveLength(2);
+    expect(secondState.models.find((model: any) => model.id === secondState.activeId)?.name).toBe(
+      "Lumi second"
+    );
+    await app.close();
+  });
+
   it("imports a VTS ZIP, selects it immediately, and serves normalized assets", async () => {
     const dir = await root();
     const app = Fastify();
