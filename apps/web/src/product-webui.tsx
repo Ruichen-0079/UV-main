@@ -184,7 +184,6 @@ export function ProductWebUI(): JSX.Element {
           {view === "advanced" && (
             <>
               <LocaleSelector />
-              {tauri && <UserSettingsPanel sections={["desktop"]} />}
               <details className="yuvi-advanced">
                 <summary>{t("Connection troubleshooting")}</summary>
                 <ProductConfigurationPanel sections={["status"]} />

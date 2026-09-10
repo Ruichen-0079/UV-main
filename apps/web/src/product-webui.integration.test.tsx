@@ -104,6 +104,7 @@ describe("Product WebUI integration", () => {
     await act(async () => click(button(node, "System")));
     expect(readText(node)).toContain("Locale controls");
     expect(readText(node)).toContain("Configuration sections: status");
+    expect(readText(node)).not.toContain("Desktop settings");
     await act(async () => click(button(node, "Open developer console")));
     expect(readText(node)).toContain("Developer dashboard");
     await act(async () => click(button(node, "← Product WebUI")));

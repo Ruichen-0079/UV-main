@@ -603,4 +603,58 @@ describe("user settings reducer", () => {
     // @ts-expect-error Unsupported secret names must fail the client type contract.
     acceptsSecretKey("memory.unknownSecret");
   });
+
+  it("keeps fresh product topology managed and durable by default", () => {
+    const form = defaultUserSettingsForm();
+    expect(form.runtimeMode).toBe("managed");
+    expect(form.runtimeAutostart).toBe(true);
+    expect(form.memoryEnabled).toBe(true);
+    expect(form.memoryBackend).toBe("mem0");
+    expect(form.memoryMode).toBe("managed");
+    expect(form.memoryLlmProvider).toBe("none");
+  });
+
+  it("round-trips legacy infrastructure fields without normal UI migration", () => {
+    const view = sampleView();
+    view.settings.runtime = {
+      mode: "external",
+      autostart: false,
+      url: "http://127.0.0.1:7121"
+    };
+    view.settings.memory = {
+      ...view.settings.memory,
+      enabled: true,
+      backend: "legacy",
+      mode: "external",
+      baseUrl: "http://127.0.0.1:7131",
+      ollamaUrl: "http://127.0.0.1:11435",
+      llm: {
+        provider: "openai",
+        model: "retained-memory-model",
+        baseUrl: "https://memory.example.test/v1"
+      }
+    };
+
+    const patch = patchFromForm(formFromView(view));
+    expect(patch).toMatchObject({
+      runtime: {
+        mode: "external",
+        autostart: false,
+        url: "http://127.0.0.1:7121"
+      },
+      memory: {
+        enabled: true,
+        backend: "legacy",
+        mode: "external",
+        baseUrl: "http://127.0.0.1:7131",
+        ollamaUrl: "http://127.0.0.1:11435",
+        llm: {
+          provider: "openai",
+          model: "retained-memory-model",
+          baseUrl: "https://memory.example.test/v1"
+        }
+      }
+    });
+  });
+
 });
