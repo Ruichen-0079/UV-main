@@ -16,6 +16,9 @@ test("product typography uses pinned offline Noto assets and never a runtime fon
   assert.match(prepare, /523d033d6cb47f4a80c58a35753646f5c3608a78/);
   assert.match(prepare, /8e44913e4ff26fc997e6856c1ec40ff4791c98c5/);
   assert.match(prepare, /upstreamRevision:\s*"9b7310b8f99fcd2583c49606e6aefca13a391350"/);
+  assert.match(prepare, /expectedBytes:\s*17_773_132/);
+  assert.match(prepare, /expectedBytes:\s*1_708_408/);
+  assert.match(prepare, /stat\.size === asset\.expectedBytes/);
   assert.match(prepare, /NotoSansSC-VF\.ttf/);
   assert.match(prepare, /NotoSansMono-VF\.ttf/);
   assert.match(prepare, /runtimeNetworkFetch:\s*false/);
