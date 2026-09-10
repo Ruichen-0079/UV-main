@@ -71,7 +71,8 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
     "desktop/yuvi-desktop-launcher",
     "desktop/yuvi.png",
     "desktop/build-provenance.json",
-    "local-stt/runtime-inventory.json"
+    "local-stt/runtime-inventory.json",
+    "provision-cubism-core.mjs"
   ]) {
     if (!fs.existsSync(path.join(resolved, required)))
       throw new Error(`Missing release notice inventory: ${required}`);
@@ -80,6 +81,21 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
   if (!fs.existsSync(notices)) throw new Error("Public Local STT notices file is missing.");
   if (rels.some((rel) => rel.startsWith("services/local-stt/")))
     throw new Error("Linux public artifact still contains Local STT adapter sources.");
+
+  const manifestPath = path.join(resolved, "install-manifest.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch {
+    throw new Error("Linux install manifest is missing or invalid.");
+  }
+  if (manifest.cubismCoreBundled !== false)
+    throw new Error("Public Linux artifact must declare Cubism Core as not bundled.");
+  if (manifest.cubismCoreProvisioning !== "required-user-import")
+    throw new Error("Public Linux artifact must require explicit user Cubism Core provisioning.");
+  if (manifest.cubismCoreExpectedFilename !== "live2dcubismcore.min.js")
+    throw new Error("Public Linux artifact has an invalid Cubism Core filename contract.");
+
   return {
     root: resolved,
     files: files.length,
