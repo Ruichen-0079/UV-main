@@ -6,14 +6,16 @@ YUVI Product surfaces use one offline typography contract. The intent is consist
 
 ## Bundled families
 
-| Role | Family | Upstream version | Pinned upstream revision | License |
-| --- | --- | --- | --- | --- |
-| Product UI / conversation / headings / labels / controls / subtitle | Noto Sans SC Variable | 2.004 | `523d033d6cb47f4a80c58a35753646f5c3608a78` | SIL Open Font License 1.1 |
-| Code / diagnostics / route identifiers | Noto Sans Mono Variable | 2.014 | `9b7310b8f99fcd2583c49606e6aefca13a391350` | SIL Open Font License 1.1 |
+| Role | Family | Version | Pinned distribution revision | Upstream source revision | License |
+| --- | --- | --- | --- | --- | --- |
+| Product UI / conversation / headings / labels / controls / subtitle | Noto Sans SC Variable | 2.004 | `523d033d6cb47f4a80c58a35753646f5c3608a78` (`notofonts/noto-cjk`) | same | SIL Open Font License 1.1 |
+| Code / diagnostics / route identifiers | Noto Sans Mono Variable | 2.014 | `8e44913e4ff26fc997e6856c1ec40ff4791c98c5` (`google/fonts`) | `9b7310b8f99fcd2583c49606e6aefca13a391350` (`notofonts/latin-greek-cyrillic`) | SIL Open Font License 1.1 |
 
-The source URLs and license URLs are pinned in `scripts/prepare-product-fonts.mjs`. Generated font binaries are not committed to the source repository. A Web build prepares them under `apps/web/public/yuvi-fonts/`, validates their OpenType signature and expected minimum size, validates representative glyph coverage from the font `cmap`, and writes `fonts-manifest.json` with the source revision, exact byte count and SHA-256 of every bundled font.
+Noto Sans Mono's upstream source repository records the 2.014 source revision, while the actual redistributable TTF consumed by A11 is pinned to the verified `google/fonts` distribution snapshot that maps that upstream file into `ofl/notosansmono`. This keeps the binary URL immutable and directly verifiable instead of assuming the upstream source tree stores generated binaries.
 
-The preparation step may fetch the pinned upstream resources while constructing an artifact. **The running YUVI product never fetches fonts from the network.** CSS references only local `/yuvi-fonts/...` assets. There is no Google Fonts stylesheet, CDN dependency, Microsoft font, Segoe-only requirement or other proprietary operating-system font dependency in the active typography contract.
+The source URLs and license URLs are pinned in `scripts/prepare-product-fonts.mjs`. Generated font binaries are not committed to the source repository. A Web build prepares them under `apps/web/public/yuvi-fonts/`, validates their OpenType signature and expected minimum size, validates representative glyph coverage from the font `cmap`, and writes `fonts-manifest.json` with distribution/source revisions, exact byte count and SHA-256 of every bundled font.
+
+The preparation step may fetch the pinned upstream/distribution resources while constructing an artifact. **The running YUVI product never fetches fonts from the network.** CSS references only local `/yuvi-fonts/...` assets. There is no Google Fonts stylesheet, CDN dependency, Microsoft font, Segoe-only requirement or other proprietary operating-system font dependency in the active typography contract.
 
 ## Typography tokens
 
@@ -49,7 +51,7 @@ The public-artifact audit verifies:
 4. total measured font bytes match `fontBytes`;
 5. the package `install-manifest.json` declares `typographyBundled=true`, `typographyRuntimeNetworkFetch=false`, the expected families and the same exact `typographyFontBytes` total.
 
-`typographyFontBytes` is the authoritative package-size impact of the two font binaries. It is generated from the actual pinned files rather than estimated in documentation, so release evidence remains valid if the upstream-pinned font payload is intentionally changed in a later atom.
+`typographyFontBytes` is the authoritative package-size impact of the two font binaries. It is generated from the actual pinned files rather than estimated in documentation, so release evidence remains valid if the pinned font payload is intentionally changed in a later atom.
 
 ## Acceptance matrix
 
