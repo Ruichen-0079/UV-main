@@ -5,7 +5,28 @@
 
 export const DEFAULT_RUNTIME_HTTP = "http://127.0.0.1:6121";
 
+export type DesktopRuntimeBindingMode = "owned" | "attach";
+
 let desktopRuntimeHttpOverride: string | null = null;
+let desktopRuntimeBindingMode: DesktopRuntimeBindingMode = "owned";
+
+export class DesktopRuntimeBindingUnavailableError extends Error {
+  constructor() {
+    super("Desktop Runtime binding is unavailable for this attach-only instance.");
+    this.name = "DesktopRuntimeBindingUnavailableError";
+  }
+}
+
+export function setDesktopRuntimeBinding(
+  mode: DesktopRuntimeBindingMode,
+  runtimeUrl: string | null
+): void {
+  desktopRuntimeBindingMode = mode;
+  // Never retain a previously verified origin if the replacement binding is
+  // absent or invalid.
+  desktopRuntimeHttpOverride = null;
+  setDesktopRuntimeHttpOverride(runtimeUrl);
+}
 
 export function setDesktopRuntimeHttpOverride(value: string | null): void {
   if (value === null) {
@@ -40,6 +61,12 @@ export function isTauriRuntime(): boolean {
 export function resolveApiBaseUrl(
   env: Record<string, string | undefined> = import.meta.env as Record<string, string | undefined>
 ): string {
+  if (isTauriRuntime() && desktopRuntimeBindingMode === "attach") {
+    if (!desktopRuntimeHttpOverride) {
+      throw new DesktopRuntimeBindingUnavailableError();
+    }
+    return desktopRuntimeHttpOverride;
+  }
   const configured = env["VITE_API_BASE_URL"]?.trim();
   if (configured) {
     return configured.replace(/\/$/, "");
@@ -64,7 +91,7 @@ export function resolveRuntimeAssetUrl(pathOrUrl: string): string {
     return pathOrUrl;
   }
   const base = resolveApiBaseUrl();
-  // /api/live2d/... → http://127.0.0.1:6121/live2d/...
+  // /api/live2d/... → the Runtime origin bound to this desktop instance.
   if (pathOrUrl.startsWith("/api/")) {
     return `${base}${pathOrUrl.slice(4)}`;
   }

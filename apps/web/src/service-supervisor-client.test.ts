@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  parseDesktopRuntimeBinding,
   parseSupervisorSnapshot,
   STATUS_FALLBACK_POLL_MS,
   subscribeServiceStatus,
@@ -30,6 +31,48 @@ function snapshot(status: "healthy" | "stopped" = "healthy"): SupervisorSnapshot
     ]
   };
 }
+
+describe("desktop runtime binding boundary", () => {
+  it("accepts a verified attach Runtime binding", () => {
+    expect(
+      parseDesktopRuntimeBinding({
+        mode: "attach",
+        ready: true,
+        instanceId: "portable-a",
+        runtimeUrl: "http://127.0.0.1:16121",
+        error: null
+      })
+    ).toEqual({
+      mode: "attach",
+      ready: true,
+      instanceId: "portable-a",
+      runtimeUrl: "http://127.0.0.1:16121",
+      error: null
+    });
+  });
+
+  it("keeps an unavailable attach binding explicit and rejects malformed ready bindings", () => {
+    expect(
+      parseDesktopRuntimeBinding({
+        mode: "attach",
+        ready: false,
+        instanceId: null,
+        runtimeUrl: null,
+        error: "identity mismatch"
+      })
+    ).toMatchObject({ mode: "attach", ready: false, runtimeUrl: null });
+
+    expect(
+      parseDesktopRuntimeBinding({
+        mode: "attach",
+        ready: true,
+        instanceId: "portable-a",
+        runtimeUrl: null,
+        error: null
+      })
+    ).toBeNull();
+  });
+});
 
 describe("service supervisor snapshot boundary", () => {
   it("accepts normalized service records", () => {

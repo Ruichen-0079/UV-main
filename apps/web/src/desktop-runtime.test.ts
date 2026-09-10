@@ -8,6 +8,8 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow }));
 
 import {
   DEFAULT_RUNTIME_HTTP,
+  DesktopRuntimeBindingUnavailableError,
+  setDesktopRuntimeBinding,
   setDesktopRuntimeHttpOverride,
   resolveApiBaseUrl,
   resolveRuntimeAssetUrl,
@@ -16,7 +18,7 @@ import {
 
 describe("desktop-runtime API base", () => {
   afterEach(() => {
-    setDesktopRuntimeHttpOverride(null);
+    setDesktopRuntimeBinding("owned", null);
     vi.unstubAllGlobals();
     getCurrentWindow.mockReset();
   });
@@ -33,15 +35,36 @@ describe("desktop-runtime API base", () => {
 
   it("uses the attached Supervisor Runtime URL inside Tauri", () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
-    setDesktopRuntimeHttpOverride("http://127.0.0.1:16121/");
+    setDesktopRuntimeBinding("attach", "http://127.0.0.1:16121/");
     expect(resolveApiBaseUrl({})).toBe("http://127.0.0.1:16121");
     expect(resolveRuntimeAssetUrl("/api/live2d/Lumi/Lumi.model3.json")).toBe(
       "http://127.0.0.1:16121/live2d/Lumi/Lumi.model3.json"
     );
   });
 
+  it("fails closed in attach mode instead of using installed 6121", () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    setDesktopRuntimeBinding("attach", null);
+    expect(() => resolveApiBaseUrl({})).toThrow(DesktopRuntimeBindingUnavailableError);
+    expect(() =>
+      resolveApiBaseUrl({ VITE_API_BASE_URL: "http://127.0.0.1:6121" })
+    ).toThrow(DesktopRuntimeBindingUnavailableError);
+    expect(() =>
+      resolveRuntimeAssetUrl("/api/live2d/Lumi/Lumi.model3.json")
+    ).toThrow(DesktopRuntimeBindingUnavailableError);
+  });
+
   it("rejects non-loopback desktop Runtime URLs", () => {
-    expect(() => setDesktopRuntimeHttpOverride("https://example.com:6121")).toThrow(/loopback/);
+    expect(() => setDesktopRuntimeBinding("attach", "https://example.com:6121")).toThrow(/loopback/);
+    expect(() => setDesktopRuntimeHttpOverride("http://192.0.2.10:16121")).toThrow(/loopback/);
+  });
+
+  it("clears a stale attach origin when rebinding fails validation", () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    setDesktopRuntimeBinding("attach", "http://127.0.0.1:16121");
+    expect(resolveApiBaseUrl({})).toBe("http://127.0.0.1:16121");
+    expect(() => setDesktopRuntimeBinding("attach", "https://example.com:6121")).toThrow(/loopback/);
+    expect(() => resolveApiBaseUrl({})).toThrow(DesktopRuntimeBindingUnavailableError);
   });
 
   it("prefers explicit VITE_API_BASE_URL", () => {
@@ -71,7 +94,7 @@ describe("desktop-runtime API base", () => {
 
 describe("desktop surface routing", () => {
   afterEach(() => {
-    setDesktopRuntimeHttpOverride(null);
+    setDesktopRuntimeBinding("owned", null);
     vi.unstubAllGlobals();
     getCurrentWindow.mockReset();
   });
