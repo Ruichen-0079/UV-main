@@ -16,6 +16,7 @@ export const PRODUCT_FONTS = Object.freeze([
     filename: "NotoSansSC-VF.ttf",
     version: "2.004",
     revision: "523d033d6cb47f4a80c58a35753646f5c3608a78",
+    upstreamRevision: "523d033d6cb47f4a80c58a35753646f5c3608a78",
     source:
       "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf",
     licenseSource:
@@ -28,11 +29,12 @@ export const PRODUCT_FONTS = Object.freeze([
     family: "YUVI Noto Sans Mono",
     filename: "NotoSansMono-VF.ttf",
     version: "2.014",
-    revision: "9b7310b8f99fcd2583c49606e6aefca13a391350",
+    revision: "8e44913e4ff26fc997e6856c1ec40ff4791c98c5",
+    upstreamRevision: "9b7310b8f99fcd2583c49606e6aefca13a391350",
     source:
-      "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/9b7310b8f99fcd2583c49606e6aefca13a391350/NotoSansMono/googlefonts/variable/NotoSansMono%5Bwdth%2Cwght%5D.ttf",
+      "https://raw.githubusercontent.com/google/fonts/8e44913e4ff26fc997e6856c1ec40ff4791c98c5/ofl/notosansmono/NotoSansMono%5Bwdth%2Cwght%5D.ttf",
     licenseSource:
-      "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/9b7310b8f99fcd2583c49606e6aefca13a391350/OFL.txt",
+      "https://raw.githubusercontent.com/google/fonts/8e44913e4ff26fc997e6856c1ec40ff4791c98c5/ofl/notosansmono/OFL.txt",
     licenseFilename: "Noto-Sans-Mono-OFL-1.1.txt",
     minimumBytes: 500_000,
     coverageSample: "YUVI AaZz09_-/.:;()[]{}<>@#&+=`'\"\\|*!?"
@@ -108,6 +110,7 @@ async function ensureFont(asset, priorManifest) {
     filename: asset.filename,
     version: asset.version,
     revision: asset.revision,
+    upstreamRevision: asset.upstreamRevision,
     source: asset.source,
     bytes: stat.size,
     sha256: sha256File(destination),
