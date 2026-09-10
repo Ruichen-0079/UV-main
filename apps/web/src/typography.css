@@ -78,6 +78,9 @@ pre,
 /* Product CSS historically names platform mono fonts directly. Keep the visual
  * rules there, but make this final typography layer the single font authority. */
 .yuvi-diagnostics-log,
+.yuvi-product-routing-truth strong,
+.yuvi-product-route-priority,
+.yuvi-product-route-title span,
 .yuvi-code,
 .yuvi-mono,
 [class~="font-mono"] {
