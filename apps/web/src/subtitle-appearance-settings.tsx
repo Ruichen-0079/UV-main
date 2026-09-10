@@ -17,18 +17,19 @@ export function SubtitleAppearanceSettings(): JSX.Element | null {
   useEffect(() => {
     if (!tauri) return;
     let cancelled = false;
-    void getSubtitlePresentationState()
-      .then((next) => {
-        if (!cancelled) {
-          setState(next);
-          setNotice("");
-        }
-      })
-      .catch((error: unknown) => {
+    const refresh = async (): Promise<void> => {
+      try {
+        const next = await getSubtitlePresentationState();
+        if (!cancelled) setState(next);
+      } catch (error) {
         if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
-      });
+      }
+    };
+    void refresh();
+    const poll = window.setInterval(() => void refresh(), 1000);
     return () => {
       cancelled = true;
+      window.clearInterval(poll);
     };
   }, [tauri]);
 

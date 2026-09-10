@@ -164,6 +164,12 @@ fn restore_companion_window_geometry(app: &AppHandle, window: &tauri::WebviewWin
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionPresentationState {
+  pub(crate) visible: bool,
+}
+
 const SUBTITLE_WINDOW_STATE_FILE: &str = "subtitle-window.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,16 +469,27 @@ impl DesktopSurfaceManager {
     }
   }
 
+  fn surface_visible(app: &AppHandle, surface: SurfaceId) -> Result<bool, String> {
+    match app.get_webview_window(surface.window_label()) {
+      Some(window) => window.is_visible().map_err(|error| error.to_string()),
+      None => Ok(false),
+    }
+  }
+
+  pub(crate) fn companion_presentation_state(
+    app: &AppHandle,
+  ) -> Result<CompanionPresentationState, String> {
+    Ok(CompanionPresentationState {
+      visible: Self::surface_visible(app, SurfaceId::Companion)?,
+    })
+  }
+
   pub(crate) fn subtitle_presentation_state(
     app: &AppHandle,
   ) -> Result<SubtitlePresentationState, String> {
     let state = subtitle_window_state(app);
-    let visible = match app.get_webview_window(SurfaceId::Subtitle.window_label()) {
-      Some(window) => window.is_visible().map_err(|error| error.to_string())?,
-      None => false,
-    };
     Ok(SubtitlePresentationState {
-      visible,
+      visible: Self::surface_visible(app, SurfaceId::Subtitle)?,
       locked: state.locked,
     })
   }

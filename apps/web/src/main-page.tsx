@@ -90,7 +90,7 @@ function createSurfaceId(prefix: string): string {
 /**
  * Desktop main window surface: chat input and the streaming text reply.
  * Speech segments are forwarded to the companion window over CompanionBus;
- * this surface never owns audio playback, Lumi, or the analyser chain.
+ * this surface never owns audio playback, Live2D rendering, or the analyser chain.
  */
 
 export function MainPage(): JSX.Element {
@@ -1219,7 +1219,7 @@ export function MainPage(): JSX.Element {
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal">{t("YUVI Chat")}</h1>
-            <p className="mt-1 text-sm text-ink-500">{t("Main window: chat input and streaming text. Speech and Lumi live in the companion window.")}</p>
+            <p className="mt-1 text-sm text-ink-500">{t("Main window: chat input and streaming text. Speech playback and Live2D rendering live in the companion window.")}</p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Pill status={companionReady ? t("companion connected") : t("companion offline")} />

@@ -6,7 +6,24 @@ import { LumiCanvas } from "./lumi-canvas.js";
 import type { LumiControllerHandle } from "./lumi-live2d.js";
 import { createInitialCompanionPresence } from "./companion-presence.js";
 
-vi.mock("./api/client.js", () => ({ apiClient: { getLive2DModels: async () => ({ activeUrl: "/api/live2d/test/test.model3.json" }) } }));
+vi.mock("./api/client.js", () => ({
+  apiClient: {
+    getLive2DModels: async () => ({
+      activeId: "test",
+      activeUrl: "/api/live2d/test/test.model3.json",
+      intendedDefault: "test",
+      models: [
+        {
+          id: "test",
+          name: "Test model",
+          model: "test.model3.json",
+          source: "user",
+          url: "/api/live2d/test/test.model3.json"
+        }
+      ]
+    })
+  }
+}));
 
 vi.mock("./lumi-live2d.js", async () => {
   const actual = await vi.importActual<typeof import("./lumi-live2d.js")>("./lumi-live2d.js");
@@ -206,7 +223,7 @@ describe("LumiCanvas normalized projection input", () => {
         showFramingToggle: false
       })
     );
-    expect(markup).toContain("Lumi avatar");
+    expect(markup).toContain("Companion avatar");
     expect(markup).not.toContain("Loading Live2D model");
     expect(markup).not.toContain("测试口型");
     expect(markup).not.toContain("显示全身");
@@ -219,6 +236,7 @@ describe("LumiCanvas normalized projection input", () => {
     let root!: Root;
     const ref = createRef<LumiControllerHandle>();
     const lifecycles: string[] = [];
+    const selections: unknown[] = [];
     const projection = {
       ...createInitialCompanionPresence(),
       activity: "listening" as const
@@ -232,6 +250,7 @@ describe("LumiCanvas normalized projection input", () => {
             ref,
             requestedProjection: projection,
             onModelLifecycle: (state) => lifecycles.push(state),
+            onModelSelection: (selection) => selections.push(selection),
             showFramingToggle: false
           })
         );
@@ -247,6 +266,7 @@ describe("LumiCanvas normalized projection input", () => {
 
       expect(ref.current?.getDebugInfo().activePresentationState).toBe("listening");
       expect(lifecycles).toContain("ready");
+      expect(selections).toContainEqual({ kind: "selected", id: "test", name: "Test model" });
     } finally {
       await act(async () => root?.unmount());
       dom.restore();
