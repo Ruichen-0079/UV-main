@@ -288,3 +288,20 @@ describe("control plane auth + loopback", () => {
     expect(shutdownSignals).toBe(1);
   });
 });
+
+it("routes numeric service IDs through the existing lifecycle authority", async () => {
+  const config = cfg();
+  const supervisor = new DesktopSupervisor(config);
+  const start = vi.spyOn(supervisor, "ensureService").mockResolvedValue(undefined);
+  const restart = vi.spyOn(supervisor, "restartService").mockResolvedValue(supervisor.snapshot());
+  const stop = vi.spyOn(supervisor, "stopService").mockResolvedValue(supervisor.snapshot());
+  const { server, port } = await startSupervisorHttpServer(supervisor, { host: "127.0.0.1", controlToken: config.controlToken });
+  servers.push(server);
+  for (const action of ["start", "restart", "stop"]) {
+    expect((await request(port, "POST", `/v1/services/mem0/${action}`, config.controlToken)).status).toBe(200);
+  }
+  expect(start).toHaveBeenCalledWith("mem0");
+  expect(restart).toHaveBeenCalledWith("mem0");
+  expect(stop).toHaveBeenCalledWith("mem0");
+  expect((await request(port, "POST", "/v1/services/mem1/start", config.controlToken)).status).toBe(404);
+});
