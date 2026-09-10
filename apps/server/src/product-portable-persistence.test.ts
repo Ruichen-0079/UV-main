@@ -46,6 +46,19 @@ function portableSettings() {
   return settings;
 }
 
+it("Portable rejects persisted Installed STT/TTS endpoints while retaining remote providers", () => {
+  const env = {YUVI_PORTABLE_VERSION: "0.1.2", LOCAL_STT_BASE_URL: "http://127.0.0.1:19876"};
+  const settings = portableSettings();
+  expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
+  settings.configuration.providers = [{id: "stt", displayName: "Local", adapter: "local-stt", baseUrl: "http://127.0.0.1:9876"}];
+  expect(() => productEnvironment(env, settings)).toThrow("own managed endpoint");
+  settings.configuration.providers[0]!.baseUrl = env.LOCAL_STT_BASE_URL;
+  expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
+  settings.configuration.providers = [{id: "tts", displayName: "Local", adapter: "gpt-sovits", baseUrl: "http://127.0.0.1:9881"}];
+  expect(() => productEnvironment(env, settings)).toThrow("owned local TTS");
+  expect(productEnvironment({}, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
+});
+
 it("Portable Product provider configuration and credentials survive restart in its own config root", () => {
   const portableRoot = mkdtempSync(join(tmpdir(), "yuvi-a8-portable-"));
   const installedRoot = mkdtempSync(join(tmpdir(), "yuvi-a8-installed-"));

@@ -290,9 +290,10 @@ export function createYuviDatabaseSingleUser(input: {
   return { ok: false, message: "CREATE DATABASE failed" };
 }
 
+type SqlResult = { rows: Array<Record<string, unknown>> };
 type SqlClient = {
   connect(): Promise<void>;
-  query(sql: string): Promise<{ rows: Array<Record<string, unknown>> }>;
+  query(sql: string): Promise<SqlResult | SqlResult[]>;
   end(): Promise<void>;
 };
 
@@ -330,7 +331,8 @@ export async function execAuthenticatedSql(input: {
   try {
     await client.connect();
     const result = await client.query(input.sql);
-    const output = result.rows
+    // pg returns one result per statement for migration/fixture SQL batches.
+    const output = (Array.isArray(result) ? result.flatMap(item => item.rows) : result.rows)
       .map((row) =>
         Object.values(row)
           .map((value) => String(value ?? ""))

@@ -57,6 +57,30 @@ fn defaults_when_no_file() {
 }
 
 #[test]
+fn portable_rebases_transport_and_preserves_product_settings_across_restart() {
+    let dir = tempdir().unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let mut old = UserSettings::default();
+    old.chat.model = "retained-model".into();
+    old.memory.persona_id = "retained-persona".into();
+    atomic_write_json(&dir.path().join("settings.json"), &old).unwrap();
+    let service = ConfigService::open_with_profile(dir.path().into(), secrets.clone(), true);
+    let payload = service.supervisor_config_push().unwrap();
+    for (key, value) in [("SERVER_PORT", "16121"), ("MEM0_BASE_URL", "http://127.0.0.1:16131"), ("LOCAL_STT_BASE_URL", "http://127.0.0.1:19876"), ("GPT_SOVITS_TTS_UPSTREAM_URL", "http://127.0.0.1:19880")] {
+        assert_eq!(payload.env.get(key).map(String::as_str), Some(value));
+    }
+    service.update_settings(UserSettingsPatch::default()).unwrap();
+    let reloaded = ConfigService::open_with_profile(dir.path().into(), secrets, true);
+    let settings = reloaded.current_settings().unwrap();
+    assert_eq!(settings.chat.model, "retained-model");
+    assert_eq!(settings.memory.persona_id, "retained-persona");
+    assert_eq!(settings.runtime.url, "http://127.0.0.1:16121");
+    let patch = serde_json::from_value(json!({"runtime":{"url":"http://127.0.0.1:6121"}})).unwrap();
+    assert!(reloaded.update_settings(patch).unwrap_err().contains("Portable"));
+    assert_eq!(reloaded.current_settings().unwrap().runtime.url, settings.runtime.url);
+}
+
+#[test]
 fn save_and_reload_roundtrip() {
     let dir = tempdir().unwrap();
     let secrets = Arc::new(MemorySecretStore::default());

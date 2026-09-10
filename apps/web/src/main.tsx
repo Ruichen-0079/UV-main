@@ -1,4 +1,5 @@
 import { fetchUserSettings } from "./user-settings-client.js";
+import { waitDesktopBinding } from "./wait-desktop-binding.js";
 import {
   getDesktopRuntimeBinding,
   retryDesktopRuntimeBinding
@@ -41,19 +42,19 @@ function renderSurface(surface: DesktopSurface): JSX.Element {
   }
 }
 
-function RuntimeBindingUnavailable({ detail }: { detail: string }): JSX.Element {
+function RuntimeBindingUnavailable({ detail, waiting = false }: { detail: string; waiting?: boolean }): JSX.Element {
   return (
     <main className="runtime-binding-unavailable" role="alert">
       <div className="runtime-binding-unavailable__card">
-        <h1>YUVI Runtime unavailable</h1>
+        <h1>{waiting ? "YUVI is starting" : "YUVI Runtime unavailable"}</h1>
         <p>
-          This desktop instance could not verify its own Runtime binding. No other local YUVI
-          Runtime will be used as a fallback.
+          {waiting ? "Waiting for this instance's services to become ready." : "This desktop instance could not verify its own Runtime binding. No other local YUVI Runtime will be used as a fallback."}
         </p>
         <p className="runtime-binding-unavailable__detail">{detail}</p>
         <button
           className="button-primary"
           type="button"
+          disabled={waiting}
           onClick={() => {
             void retryDesktopRuntimeBinding().finally(() => window.location.reload());
           }}
@@ -76,7 +77,9 @@ void resolveDesktopSurface().then(async (surface) => {
   if (isTauriRuntime()) {
     let bindingMode: DesktopRuntimeBindingMode = "attach";
     try {
-      const binding = await getDesktopRuntimeBinding();
+      const binding = await waitDesktopBinding(getDesktopRuntimeBinding, detail => {
+        root.render(<RuntimeBindingUnavailable detail={detail} waiting />);
+      });
       if (!binding) throw new Error("Desktop Runtime binding projection is unavailable.");
       bindingMode = binding.mode;
       setDesktopRuntimeBinding(binding.mode, binding.ready ? binding.runtimeUrl : null);

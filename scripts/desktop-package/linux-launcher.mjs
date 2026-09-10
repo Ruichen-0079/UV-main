@@ -16,8 +16,10 @@ for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true, mode
 const pointer = path.join(dirs.supervisor, 'active-instance.json');
 const desktopShell = path.join(root, 'desktop', 'yuvi-desktop');
 if (!fs.existsSync(desktopShell)) throw new Error('Portable desktop shell is missing.');
+let expectedSupervisorPid;
 async function control(route) {
   const active = JSON.parse(fs.readFileSync(pointer, 'utf8'));
+  if (expectedSupervisorPid && active.pid !== expectedSupervisorPid) throw new Error('Waiting for this launcher’s Supervisor identity.');
   if (!path.resolve(active.endpointFile).startsWith(dirs.supervisor + path.sep)) throw new Error('No active instance at this portable location.');
   const endpoint = JSON.parse(fs.readFileSync(active.endpointFile, 'utf8'));
   if (endpoint.instanceId !== active.instanceId || endpoint.pid !== active.pid || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port)) throw new Error('Invalid portable instance identity.');
@@ -55,8 +57,13 @@ try {
       throw new Error('Usage: ./yuvi cubism-core [status|import /path/to/live2dcubismcore.min.js]');
     }
   } else if (command === 'start') {
+    // Legacy env files can override both the Supervisor and Runtime transport
+    // and state roots. Product settings/secrets are the Portable authority.
+    for (const name of ['.env', '.env.local']) {
+      if (fs.existsSync(path.join(dirs.config, name))) throw new Error(`Portable cannot prove isolation with legacy ${name} in ${dirs.config}. Move that file aside and use Product settings.`);
+    }
     const runtimePort = 16121, webPort = 15173, sttPort = 19876;
-    for (const port of [runtimePort, webPort, sttPort]) await available(port);
+    for (const port of [runtimePort, webPort, sttPort, 16131, 19881, 19880]) await available(port);
     // Parent provider credentials and Installed state never cross the Portable boundary.
     // Durable Product configuration and secrets are restored only from this release namespace.
     const guiSessionEnv = Object.fromEntries(
@@ -72,11 +79,17 @@ try {
       YUVI_CONFIG_ROOT: dirs.config, YUVI_DATA_ROOT: dirs.data, YUVI_CACHE_ROOT: dirs.cache,
       YUVI_RUNTIME_ENV_DIR: dirs.config, YUVI_SUPERVISOR_STATE_ROOT: dirs.supervisor,
       YUVI_SECRET_NAMESPACE: secretNamespace,
+      YUVI_PORTABLE_VERSION: packageIdentity.version,
+      YUVI_POSTGRES_MODE: 'private',
+      YUVI_MEM0_DATA_DIR: path.join(dirs.data, 'Mem0', 'data'),
+      YUVI_MEM0_LOG_DIR: path.join(dirs.data, 'Mem0', 'logs'),
+      MEM0_BASE_URL: 'http://127.0.0.1:16131',
       SERVER_HOST: '127.0.0.1', SERVER_PORT: String(runtimePort), LOCAL_STT_BASE_URL: `http://127.0.0.1:${sttPort}`,
-      LOCAL_TTS_BASE_URL: 'http://127.0.0.1:19881', GPT_SOVITS_TTS_UPSTREAM_URL: 'http://127.0.0.1:19880'
+      LOCAL_TTS_BASE_URL: 'http://127.0.0.1:19881', GPT_SOVITS_TTS_BASE_URL: 'http://127.0.0.1:19881', GPT_SOVITS_TTS_UPSTREAM_URL: 'http://127.0.0.1:19880'
     };
     const node = path.join(root, 'runtime', 'node');
     const supervisor = spawn(node, [path.join(root, 'supervisor', 'yuvi-desktop-supervisor.cjs'), '--mode', 'packaged', '--resource-root', root, '--state-root', dirs.data, '--runtime-manifest', path.join(root, 'runtime', 'runtime-manifest.json')], { cwd: state, env, stdio: 'inherit' });
+    expectedSupervisorPid = supervisor.pid;
     const desktopEnv = { ...env, YUVI_DESKTOP_SUPERVISOR_BINDING: 'attach' };
     if (!process.env.GDK_BACKEND && guiSessionEnv.WAYLAND_DISPLAY && guiSessionEnv.DISPLAY) {
       desktopEnv.GDK_BACKEND = 'x11';
@@ -97,7 +110,7 @@ try {
       closing = true;
       web?.kill('SIGTERM');
       desktop?.kill('SIGTERM');
-      process.exitCode = code || 0;
+      process.exitCode = process.exitCode || code || 0;
     });
 
     // A9: the Supervisor first publishes only its authenticated control plane.
@@ -123,7 +136,8 @@ try {
 
     // The attached desktop now pushes Product config + private secret and sequences
     // PostgreSQL -> migrations -> Mem0 -> Runtime through the existing Supervisor.
-    const runtimeDeadline = Date.now() + 120_000;
+    // Cover the existing Desktop PG (35s), Mem0 (90s), Runtime (45s) budgets.
+    const runtimeDeadline = Date.now() + 180_000;
     while (!closing) {
       try {
         const status = await control('/v1/status');

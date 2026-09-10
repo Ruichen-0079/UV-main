@@ -22,10 +22,26 @@ function distribution() {
   );
   fs.writeFileSync(path.join(root, "share", "extension", "vector--0.8.1.sql"), "select 1;\n");
   fs.writeFileSync(path.join(root, "lib", "postgresql", "vector.so"), "ELF-vector");
+  fs.writeFileSync(path.join(root, "share", "extension", "pgcrypto.control"), "default_version = '1.3'\n");
+  fs.writeFileSync(path.join(root, "share", "extension", "pgcrypto--1.3.sql"), "select 1;\n");
+  fs.writeFileSync(path.join(root, "lib", "postgresql", "pgcrypto.so"), "ELF-pgcrypto");
+  fs.writeFileSync(path.join(root, "share", "extension", "pg_trgm.control"), "default_version = '1.6'\n");
+  for (const version of ["1.3", "1.3--1.4", "1.4--1.5", "1.5--1.6"]) {
+    fs.writeFileSync(path.join(root, "share", "extension", `pg_trgm--${version}.sql`), "select 1;\n");
+  }
+  fs.writeFileSync(path.join(root, "lib", "postgresql", "pg_trgm.so"), "ELF-pg-trgm");
   return root;
 }
 
 const versionProbe = () => ({ status: 0, stdout: "postgres (PostgreSQL) 16.15\n", stderr: "" });
+
+test("rejects the released distribution's missing migration dependency", () => {
+  const root = distribution();
+  try {
+    fs.rmSync(path.join(root, "share", "extension", "pgcrypto.control"));
+    assert.throws(() => validateLinuxPostgresDistribution(root, {spawnSyncImpl: versionProbe}), /pgcrypto/);
+  } finally { fs.rmSync(root, {recursive: true, force: true}); }
+});
 
 test("validates PostgreSQL 16 and the complete pgvector extension payload", () => {
   const root = distribution();
