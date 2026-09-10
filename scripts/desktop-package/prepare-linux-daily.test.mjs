@@ -13,9 +13,14 @@ import {
 
 const root = path.resolve(import.meta.dirname, "../..");
 
-test("linux daily prepare packages the Local STT sidecar instead of adapter sources", () => {
+test("linux daily prepare packages managed Memory and Local STT without adapter sources", () => {
   const source = fs.readFileSync(new URL("./prepare-linux-daily.mjs", import.meta.url), "utf8");
   assert.match(source, /buildPackagedLocalStt/);
+  assert.match(source, /buildLinuxPackagedMem0/);
+  assert.match(source, /stageLinuxPostgresDistribution/);
+  assert.match(source, /postgresql-16-pgvector/);
+  assert.match(source, /mem0-sidecar/);
+  assert.match(source, /managedMemorySidecars: true/);
   assert.match(source, /genericLocalSttWeightsBundled: true/);
   assert.match(source, /local-stt-sidecar/);
   assert.match(source, /tauri-desktop-shell/);
@@ -58,12 +63,17 @@ test("linux desktop launchers prefer XWayland for reliable topmost semantics", (
   assert.match(portableLauncher, /TMPDIR: dirs\.tmp/);
 });
 
-test("linux daily installer leaves packaged Local STT stopped without a route", () => {
+test("linux daily installer keeps Local STT route-controlled and no longer disables managed Memory", () => {
   const source = fs.readFileSync(new URL("./install-linux-daily.mjs", import.meta.url), "utf8");
   assert.match(source, /YUVI_AUTOSTART_LOCAL_STT=0/);
   assert.match(source, /local-stt", "yuvi-local-stt"/);
+  assert.match(source, /mem0", "yuvi-mem0"/);
+  assert.match(source, /postgres", "bin", "postgres"/);
+  assert.match(source, /vector\.control/);
   assert.doesNotMatch(source, /YUVI_LOCAL_STT_START_COMMAND/);
-  assert.match(source, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
+  assert.doesNotMatch(source, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
+  assert.doesNotMatch(source, /YUVI_POSTGRES_MODE=external/);
+  assert.doesNotMatch(source, /YUVI_AUTOSTART_MEM0=0/);
   assert.match(source, /yuvi-desktop-launcher/);
   assert.doesNotMatch(source, /Exec=xdg-open/);
 });
@@ -96,6 +106,9 @@ test(
       fs.mkdirSync(path.join(resource, "supervisor"), { recursive: true });
       fs.mkdirSync(path.join(resource, "web", "dist"), { recursive: true });
       fs.mkdirSync(path.join(resource, "local-stt"), { recursive: true });
+      fs.mkdirSync(path.join(resource, "mem0"), { recursive: true });
+      fs.mkdirSync(path.join(resource, "postgres", "bin"), { recursive: true });
+      fs.mkdirSync(path.join(resource, "postgres", "share", "extension"), { recursive: true });
       fs.writeFileSync(path.join(resource, "runtime", "node"), "#!/bin/true\n", { mode: 0o755 });
       fs.writeFileSync(
         path.join(resource, "supervisor", "yuvi-desktop-supervisor.cjs"),
@@ -108,6 +121,17 @@ test(
         mode: 0o755
       });
       fs.writeFileSync(path.join(resource, "local-stt", "local-stt-manifest.json"), "{}\n");
+      fs.writeFileSync(path.join(resource, "mem0", "yuvi-mem0"), "#!/bin/true\n", { mode: 0o755 });
+      fs.writeFileSync(path.join(resource, "mem0", "mem0-manifest.json"), "{}\n");
+      for (const tool of ["postgres", "pg_ctl", "initdb"]) {
+        fs.writeFileSync(path.join(resource, "postgres", "bin", tool), "#!/bin/true\n", {
+          mode: 0o755
+        });
+      }
+      fs.writeFileSync(
+        path.join(resource, "postgres", "share", "extension", "vector.control"),
+        "default_version='0.8.6'\n"
+      );
       fs.mkdirSync(path.join(resource, "desktop"), { recursive: true });
       fs.writeFileSync(path.join(resource, "desktop", "yuvi-desktop"), "ELF\n", { mode: 0o755 });
       fs.writeFileSync(
@@ -143,7 +167,9 @@ test(
         "utf8"
       );
       assert.match(unit, /YUVI_AUTOSTART_LOCAL_STT=0/);
-      assert.match(unit, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
+      assert.doesNotMatch(unit, /YUVI_PACKAGED_EXTERNAL_SIDECARS=1/);
+      assert.doesNotMatch(unit, /YUVI_POSTGRES_MODE=external/);
+      assert.doesNotMatch(unit, /YUVI_AUTOSTART_MEM0=0/);
       assert.doesNotMatch(unit, /YUVI_LOCAL_STT_START_COMMAND/);
       const desktopEntry = fs.readFileSync(
         path.join(home, "data/applications/yuvi-daily.desktop"),
@@ -157,7 +183,6 @@ test(
     }
   }
 );
-
 
 function writePortableManifest(packageRoot, version, checkoutSha) {
   fs.mkdirSync(packageRoot, { recursive: true });

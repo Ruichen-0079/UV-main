@@ -1,5 +1,6 @@
 mod config;
 mod desktop_surface;
+mod durable_memory_boot;
 mod lifecycle;
 mod packaging;
 mod supervisor;
@@ -169,7 +170,6 @@ fn show_webui(app: tauri::AppHandle) -> Result<(), String> {
   DesktopSurfaceManager::execute(&app, SurfaceId::WebUI, SurfaceCommand::Show)
 }
 
-
 #[tauri::command]
 fn show_subtitle(app: tauri::AppHandle) -> Result<(), String> {
   DesktopSurfaceManager::execute(&app, SurfaceId::Subtitle, SurfaceCommand::Show)
@@ -234,6 +234,24 @@ pub fn run() {
       DesktopSurfaceManager::ensure(&app.handle(), SurfaceId::Companion)?;
       main_window.set_focus()?;
       tray::build_tray(&app.handle())?;
+
+      // Linux packaged attach mode owns no Supervisor process, but it is the
+      // platform-secret authority. Run the staged durable-Memory boot off the
+      // UI thread after the control plane is bound.
+      #[cfg(target_os = "linux")]
+      if attach_existing {
+        let boot_app = app.handle().clone();
+        if let Err(error) = std::thread::Builder::new()
+          .name("yuvi-durable-memory-boot".into())
+          .spawn(move || {
+            if let Err(error) = durable_memory_boot::bootstrap_attached_linux(&boot_app) {
+              eprintln!("[yuvi-desktop] durable Memory bootstrap skipped: {error}");
+            }
+          })
+        {
+          eprintln!("[yuvi-desktop] durable Memory bootstrap thread failed: {error}");
+        }
+      }
 
       // Development/Windows keep the existing Tauri-owned bootstrap path
       // unchanged. Attach-only release mode was already bound before WebViews.

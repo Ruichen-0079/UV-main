@@ -227,7 +227,7 @@ export type SupervisorLayout =
 export type Mem0Manifest = {
   schemaVersion: 1;
   protocolVersion: 1;
-  platform: "win32";
+  platform: "win32" | "linux";
   arch: "x64";
   executable: string;
   healthPath: "/health";

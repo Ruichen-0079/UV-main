@@ -41,10 +41,24 @@ function fixture(): { dir: string; manifestPath: string; executable: string } {
 }
 
 describe("Mem0 manifest", () => {
-  it("accepts the fixed manifest and resolves its executable", () => {
+  it("accepts the fixed Windows manifest and resolves its executable", () => {
     const tree = fixture();
     expect(readMem0Manifest(tree.manifestPath)).toEqual(validManifest());
     expect(resolveMem0ManifestExecutable(tree.manifestPath, validManifest())).toBe(tree.executable);
+  });
+
+  it("accepts the fixed Linux x64 manifest", () => {
+    expect(
+      validateMem0Manifest({
+        ...validManifest(),
+        platform: "linux",
+        executable: "yuvi-mem0"
+      })
+    ).toEqual({
+      ...validManifest(),
+      platform: "linux",
+      executable: "yuvi-mem0"
+    });
   });
 
   it("rejects missing and invalid JSON files", () => {
@@ -61,7 +75,7 @@ describe("Mem0 manifest", () => {
     [[], "object"],
     [{ ...validManifest(), schemaVersion: 2 }, "schemaVersion"],
     [{ ...validManifest(), protocolVersion: 2 }, "protocolVersion"],
-    [{ ...validManifest(), platform: "linux" }, "platform"],
+    [{ ...validManifest(), platform: "darwin" }, "platform"],
     [{ ...validManifest(), arch: "arm64" }, "arch"],
     [{ ...validManifest(), healthPath: "/status" }, "healthPath"],
     [{ ...validManifest(), defaultHost: "0.0.0.0" }, "defaultHost"],

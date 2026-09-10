@@ -12,6 +12,14 @@ import { buildLinuxWeb } from "./build-linux-web.mjs";
 import { bundleSupervisorCjs } from "./build-supervisor.mjs";
 import { bundleRuntimeServer } from "./build-runtime.mjs";
 import {
+  buildLinuxPackagedMem0,
+  validateLinuxMem0Artifact
+} from "./build-linux-mem0.mjs";
+import {
+  stageLinuxPostgresDistribution,
+  validateLinuxPostgresDistribution
+} from "./stage-linux-postgres.mjs";
+import {
   buildPackagedLocalStt,
   ensureLinuxLocalSttPython,
   validateLocalSttArtifact
@@ -111,6 +119,16 @@ export async function prepareLinuxDailyPackage() {
     if (name.endsWith(".sql"))
       fs.copyFileSync(path.join(MEMORY_MIGRATIONS_DIR, name), path.join(migDest, name));
   }
+
+  // A9 managed Memory resources. PostgreSQL is immutable package content;
+  // its mutable cluster remains under the existing per-instance YUVI data root.
+  const postgresDir = path.join(out, "postgres");
+  stageLinuxPostgresDistribution({ destination: postgresDir });
+  validateLinuxPostgresDistribution(postgresDir);
+  const mem0Dir = path.join(out, "mem0");
+  buildLinuxPackagedMem0({ artifactDir: mem0Dir });
+  validateLinuxMem0Artifact(mem0Dir, { repoRoot: REPO_ROOT });
+
   await buildLinuxWeb();
   const webDistSrc = path.join(REPO_ROOT, "apps", "web", "dist");
   assertDir(webDistSrc, "apps/web/dist");
@@ -182,6 +200,8 @@ export async function prepareLinuxDailyPackage() {
       "supervisor.cjs",
       "runtime.mjs",
       "bundled-node",
+      "postgresql-16-pgvector",
+      "mem0-sidecar",
       "static-web",
       "tauri-desktop-shell",
       "local-stt-sidecar",
@@ -190,6 +210,7 @@ export async function prepareLinuxDailyPackage() {
     ],
     privateWeightsBundled: false,
     genericLocalSttWeightsBundled: true,
+    managedMemorySidecars: true,
     externalSidecars: true
   });
   fs.copyFileSync(

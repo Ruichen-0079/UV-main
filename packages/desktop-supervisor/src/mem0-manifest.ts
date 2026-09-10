@@ -47,8 +47,9 @@ export function validateMem0Manifest(raw: unknown): Mem0Manifest {
   if (obj["protocolVersion"] !== 1) {
     throw manifestError("protocolVersion must be 1");
   }
-  if (obj["platform"] !== "win32") {
-    throw manifestError("platform must be win32");
+  const platform = obj["platform"];
+  if (platform !== "win32" && platform !== "linux") {
+    throw manifestError("platform must be win32 or linux");
   }
   if (obj["arch"] !== "x64") {
     throw manifestError("arch must be x64");
@@ -72,7 +73,7 @@ export function validateMem0Manifest(raw: unknown): Mem0Manifest {
   return {
     schemaVersion: 1,
     protocolVersion: 1,
-    platform: "win32",
+    platform,
     arch: "x64",
     executable,
     healthPath: "/health",

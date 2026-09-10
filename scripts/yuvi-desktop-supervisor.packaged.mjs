@@ -32,7 +32,15 @@ async function main() {
       ? loadPackagedSupervisorConfig({
           resourceRoot: required(args, "resource-root"),
           dataRoot: required(args, "state-root"),
-          ...(process.env["YUVI_SUPERVISOR_STATE_ROOT"] ? { stateDirectory: path.join(defaultDesktopSupervisorRoot(), "instances", randomUUID()) } : {}),
+          ...(process.env["YUVI_SUPERVISOR_STATE_ROOT"]
+            ? {
+                stateDirectory: path.join(
+                  defaultDesktopSupervisorRoot(),
+                  "instances",
+                  randomUUID()
+                )
+              }
+            : {}),
           runtimeManifestPath: required(args, "runtime-manifest"),
           mem0ManifestPath: args["mem0-manifest"],
           controlPort: args.port ? Number(args.port) : 0,
@@ -49,8 +57,6 @@ async function main() {
 
   const pointerRoot = defaultDesktopSupervisorRoot();
   fs.mkdirSync(pointerRoot, { recursive: true });
-  // One packaged Supervisor per user state root — prevents multiple installs
-  // from racing active-instance.json and adopting each other's Runtime without secrets.
   const releaseInstanceLock = acquireSupervisorInstanceLock(pointerRoot);
   const activePointer = path.join(pointerRoot, "active-instance.json");
   const endpointFile = path.join(config.stateDirectory, "control-endpoint.json");
@@ -61,7 +67,6 @@ async function main() {
     // ignore
   }
 
-  // The child reads only this instance's authenticated endpoint, never a shared discovery pointer.
   config.env["YUVI_SUPERVISOR_ENDPOINT_FILE"] = endpointFile;
   if (config.runtimeStart) config.runtimeStart.env["YUVI_SUPERVISOR_ENDPOINT_FILE"] = endpointFile;
   const supervisor = new DesktopSupervisor(config);
@@ -69,9 +74,6 @@ async function main() {
     host: config.controlHost,
     port: config.controlPort,
     controlToken: config.controlToken,
-    // /v1/shutdown is terminal: once the drain has finished, this supervisor
-    // process itself must exit so the Tauri owner never outlives a drained
-    // control plane. The timer lets the HTTP ack flush before exiting.
     onShutdownComplete: () => {
       setTimeout(() => void gracefulShutdown("control-plane-shutdown"), 150);
     }
@@ -118,19 +120,32 @@ async function main() {
   );
 
   supervisor.startBackgroundRefresh(5_000);
-  void supervisor.bootstrap().then((snap) => {
+  if (mode === "packaged") {
+    // A9 barrier: packaged services remain stopped until the attached Tauri
+    // ConfigService has supplied the platform-secret-backed PostgreSQL credential.
+    // The same DesktopSupervisor still owns every subsequent start/stop action.
     console.log(
       JSON.stringify({
         ok: true,
-        event: "supervisor.bootstrap",
-        services: snap.services.map((s) => ({
-          id: s.id,
-          status: s.status,
-          ownership: s.ownership
-        }))
+        event: "supervisor.awaiting-product-bootstrap",
+        instanceId: config.instanceId
       })
     );
-  });
+  } else {
+    void supervisor.bootstrap().then((snap) => {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          event: "supervisor.bootstrap",
+          services: snap.services.map((s) => ({
+            id: s.id,
+            status: s.status,
+            ownership: s.ownership
+          }))
+        })
+      );
+    });
+  }
 
   let shuttingDown = false;
   async function gracefulShutdown(reason) {
@@ -199,7 +214,6 @@ function writeEndpointSecure(filePath, data) {
 function restrictToCurrentUser(targetPath) {
   if (process.platform !== "win32") {
     try {
-      // Directories need the traverse bit; a 0600 directory cannot hold files.
       const isDirectory = fs.statSync(targetPath).isDirectory();
       fs.chmodSync(targetPath, isDirectory ? 0o700 : 0o600);
     } catch {
@@ -231,8 +245,6 @@ function defaultDesktopSupervisorRoot() {
     fs.mkdirSync(root, { recursive: true });
     return root;
   }
-  // Mirrors defaultStateDirectory() (XDG data-home) so the Tauri launcher's
-  // desktop_state_dir() and this pointer root agree on non-Windows hosts.
   const xdgDataHome = process.env["XDG_DATA_HOME"]?.trim();
   if (xdgDataHome && path.isAbsolute(xdgDataHome)) {
     const root = path.join(xdgDataHome, "YUVI", "DesktopSupervisor");
@@ -240,9 +252,10 @@ function defaultDesktopSupervisorRoot() {
     return root;
   }
   const home = process.env["HOME"]?.trim();
-  const base = home && path.isAbsolute(home)
-    ? path.join(home, ".local", "share", "YUVI", "DesktopSupervisor")
-    : path.join(os.tmpdir(), "YUVI-DesktopSupervisor");
+  const base =
+    home && path.isAbsolute(home)
+      ? path.join(home, ".local", "share", "YUVI", "DesktopSupervisor")
+      : path.join(os.tmpdir(), "YUVI-DesktopSupervisor");
   fs.mkdirSync(base, { recursive: true });
   return base;
 }
