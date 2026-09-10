@@ -95,7 +95,8 @@ export function provisionCubismCore({ sourcePath, dataRoot }) {
     filename: CUBISM_CORE_FILENAME,
     bytes: source.bytes,
     sha256: source.sha256,
-    sourceKind: "user-provisioned-official-sdk",
+    sourceKind: "user-provided",
+    expectedSource: "official Live2D Cubism SDK for Web",
     redistributedByYuvi: false,
     officialDownload: OFFICIAL_DOWNLOAD_URL,
     license: OFFICIAL_LICENSE_URL
