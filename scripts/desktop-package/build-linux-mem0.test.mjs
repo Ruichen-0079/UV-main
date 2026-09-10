@@ -14,12 +14,15 @@ function temp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-linux-mem0-test-"));
 }
 
-function artifact({ manifest = LINUX_MEM0_MANIFEST, files = 1001, bytes = 52 * 1024 * 1024 } = {}) {
+function artifact({ manifest = LINUX_MEM0_MANIFEST, files = 850, bytes = 52 * 1024 * 1024 } = {}) {
   const root = temp();
   fs.writeFileSync(path.join(root, "yuvi-mem0"), linuxMem0MigrationWrapper(), { mode: 0o755 });
   fs.writeFileSync(path.join(root, LINUX_MEM0_REAL_EXE_NAME), "ELF-placeholder", { mode: 0o755 });
   fs.mkdirSync(path.join(root, "_internal"));
-  fs.writeFileSync(path.join(root, "_internal", "runtime.dat"), "x");
+  for (const file of ["base_library.zip", "libpython3.11.so.1.0", "certifi/cacert.pem", "mem0ai-0.1.107.dist-info/METADATA"]) {
+    fs.mkdirSync(path.dirname(path.join(root, "_internal", file)), { recursive: true });
+    fs.writeFileSync(path.join(root, "_internal", file), "fixture");
+  }
   fs.writeFileSync(path.join(root, "mem0-manifest.json"), JSON.stringify(manifest));
   const each = Math.max(1, Math.ceil(bytes / files));
   for (let index = 0; index < files; index += 1) {
@@ -54,7 +57,7 @@ test("Linux Mem0 artifact validator accepts a complete onedir tree", () => {
   const root = artifact();
   try {
     const result = validateLinuxMem0Artifact(root);
-    assert.equal(result.files > 1000, true);
+    assert.equal(result.files < 1000, true);
     assert.equal(result.bytes > 50 * 1024 * 1024, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -97,4 +100,13 @@ test("Linux Mem0 artifact rejects .env and repository-path leakage", () => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(path.dirname(repoRoot), { recursive: true, force: true });
   }
+});
+
+test("Linux Mem0 validates required runtime payload rather than platform file count", () => {
+  const root = artifact();
+  try {
+    assert.ok(validateLinuxMem0Artifact(root).files < 1000);
+    fs.rmSync(path.join(root, "_internal", "libpython3.11.so.1.0"));
+    assert.throws(() => validateLinuxMem0Artifact(root), /missing libpython/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
