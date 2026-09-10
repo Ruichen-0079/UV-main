@@ -189,6 +189,14 @@ export async function prepareLinuxDailyPackage() {
     path.join(localSttDir, "THIRD_PARTY_NOTICES.md"),
     path.join(out, "THIRD_PARTY_NOTICES.local-stt.md")
   );
+
+  // A10: package only the bounded importer. The proprietary Core itself is
+  // intentionally absent and remains forbidden by the public-artifact audit.
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts", "desktop-package", "provision-cubism-core.mjs"),
+    path.join(out, "provision-cubism-core.mjs")
+  );
+
   writeJson(path.join(out, "install-manifest.json"), {
     schemaVersion: 1,
     kind: "yuvi-linux-daily-packaged",
@@ -206,12 +214,16 @@ export async function prepareLinuxDailyPackage() {
       "tauri-desktop-shell",
       "local-stt-sidecar",
       "local-stt-models",
-      "local-stt-notices"
+      "local-stt-notices",
+      "cubism-core-provisioner"
     ],
     privateWeightsBundled: false,
     genericLocalSttWeightsBundled: true,
     managedMemorySidecars: true,
-    externalSidecars: true
+    externalSidecars: true,
+    cubismCoreBundled: false,
+    cubismCoreProvisioning: "required-user-import",
+    cubismCoreExpectedFilename: "live2dcubismcore.min.js"
   });
   fs.copyFileSync(
     path.join(REPO_ROOT, "scripts", "desktop-package", "install-linux-daily.mjs"),
