@@ -22,7 +22,7 @@ export const PRODUCT_FONTS = Object.freeze([
     licenseSource:
       "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE",
     licenseFilename: "Noto-Sans-SC-OFL-1.1.txt",
-    minimumBytes: 10_000_000,
+    expectedBytes: 17_773_132,
     coverageSample: "YUVI 设置 记忆 模型 提供商 路由 伴侣 字幕 你好，。！？“”《》AaZz09—()[]{}<>/@#&+="
   }),
   Object.freeze({
@@ -36,7 +36,7 @@ export const PRODUCT_FONTS = Object.freeze([
     licenseSource:
       "https://raw.githubusercontent.com/google/fonts/8e44913e4ff26fc997e6856c1ec40ff4791c98c5/ofl/notosansmono/OFL.txt",
     licenseFilename: "Noto-Sans-Mono-OFL-1.1.txt",
-    minimumBytes: 500_000,
+    expectedBytes: 1_708_408,
     coverageSample: "YUVI AaZz09_-/.:;()[]{}<>@#&+=`'\"\\|*!?"
   })
 ]);
@@ -74,7 +74,7 @@ function cachedFontMatches(asset, manifest) {
   const stat = fs.statSync(destination);
   return (
     stat.isFile() &&
-    stat.size >= asset.minimumBytes &&
+    stat.size === asset.expectedBytes &&
     hasOpenTypeSignature(destination) &&
     entry.revision === asset.revision &&
     entry.source === asset.source &&
@@ -101,8 +101,10 @@ async function ensureFont(asset, priorManifest) {
     await downloadFile(asset.source, destination);
   }
   const stat = fs.statSync(destination);
-  if (!stat.isFile() || stat.size < asset.minimumBytes || !hasOpenTypeSignature(destination)) {
-    throw new Error(`Prepared font failed validation: ${asset.filename}`);
+  if (!stat.isFile() || stat.size !== asset.expectedBytes || !hasOpenTypeSignature(destination)) {
+    throw new Error(
+      `Prepared font failed validation: ${asset.filename} (${stat.size} bytes; expected ${asset.expectedBytes}).`
+    );
   }
   assertFontCoverage(destination, asset.coverageSample, asset.family);
   return {
