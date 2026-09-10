@@ -11,6 +11,7 @@ const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8");
 test("Linux release packages only the Cubism Core provisioner, never Core", () => {
   const prepare = read("scripts/desktop-package/prepare-linux-daily.mjs");
   const audit = read("scripts/desktop-package/audit-linux-public-artifact.mjs");
+  const provisioner = read("scripts/desktop-package/provision-cubism-core.mjs");
 
   assert.match(prepare, /provision-cubism-core\.mjs/);
   assert.match(prepare, /cubismCoreBundled:\s*false/);
@@ -22,6 +23,9 @@ test("Linux release packages only the Cubism Core provisioner, never Core", () =
   assert.match(audit, /"provision-cubism-core\.mjs"/);
   assert.match(audit, /cubismCoreBundled\s*!==\s*false/);
   assert.match(audit, /required-user-import/);
+
+  assert.doesNotMatch(provisioner, /\bfetch\s*\(/);
+  assert.doesNotMatch(provisioner, /https?\.request\s*\(/);
 });
 
 test("existing Runtime resolver discovers the managed Core from the YUVI data root", () => {
