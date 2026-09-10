@@ -1,4 +1,5 @@
 /** Audit a Linux public package for private/user leakage and required Local STT files. */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,6 +22,10 @@ const FORBIDDEN_NAME = [
   /(^|\/)(?:services|node_modules|tests?)(\/|$)/i,
   /(?:live2dcubismcore|hiyori|esbuild-metafile|\.moc3$|\.map$)/i
 ];
+
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
 
 function listFiles(dir, out = [], root = fs.realpathSync(dir)) {
   if (!fs.existsSync(dir)) return out;
@@ -67,6 +72,11 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
     "supervisor/THIRD_PARTY_NOTICES.supervisor.json",
     "web/dist/THIRD_PARTY_NOTICES.web.json",
     "web/dist/licenses/cubism-framework/LICENSE.md",
+    "web/dist/yuvi-fonts/NotoSansSC-VF.ttf",
+    "web/dist/yuvi-fonts/NotoSansMono-VF.ttf",
+    "web/dist/yuvi-fonts/fonts-manifest.json",
+    "web/dist/yuvi-fonts/licenses/Noto-Sans-SC-OFL-1.1.txt",
+    "web/dist/yuvi-fonts/licenses/Noto-Sans-Mono-OFL-1.1.txt",
     "desktop/yuvi-desktop",
     "desktop/yuvi-desktop-launcher",
     "desktop/yuvi.png",
@@ -82,12 +92,54 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
   if (rels.some((rel) => rel.startsWith("services/local-stt/")))
     throw new Error("Linux public artifact still contains Local STT adapter sources.");
 
+  const typographyPath = path.join(resolved, "web", "dist", "yuvi-fonts", "fonts-manifest.json");
+  let typography;
+  try {
+    typography = JSON.parse(fs.readFileSync(typographyPath, "utf8"));
+  } catch {
+    throw new Error("Bundled typography manifest is missing or invalid.");
+  }
+  if (
+    typography.schemaVersion !== 1 ||
+    typography.runtimeNetworkFetch !== false ||
+    typography.bodyFamily !== "YUVI Noto Sans SC" ||
+    typography.monospaceFamily !== "YUVI Noto Sans Mono" ||
+    !Number.isFinite(typography.fontBytes) ||
+    typography.fontBytes <= 10_000_000 ||
+    !Array.isArray(typography.fonts) ||
+    typography.fonts.length !== 2
+  ) {
+    throw new Error("Bundled typography contract is invalid.");
+  }
+  let measuredFontBytes = 0;
+  for (const font of typography.fonts) {
+    const fontPath = path.join(resolved, "web", "dist", "yuvi-fonts", font.filename);
+    const details = fs.statSync(fontPath);
+    measuredFontBytes += details.size;
+    if (details.size !== font.bytes || sha256File(fontPath) !== font.sha256) {
+      throw new Error(`Bundled typography integrity mismatch: ${font.filename}`);
+    }
+  }
+  if (measuredFontBytes !== typography.fontBytes) {
+    throw new Error("Bundled typography byte accounting is inconsistent.");
+  }
+
   const manifestPath = path.join(resolved, "install-manifest.json");
   let manifest;
   try {
     manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   } catch {
     throw new Error("Linux install manifest is missing or invalid.");
+  }
+  if (
+    manifest.typographyBundled !== true ||
+    manifest.typographyRuntimeNetworkFetch !== false ||
+    manifest.typographyFontBytes !== typography.fontBytes ||
+    !Array.isArray(manifest.typographyFamilies) ||
+    !manifest.typographyFamilies.includes("YUVI Noto Sans SC") ||
+    !manifest.typographyFamilies.includes("YUVI Noto Sans Mono")
+  ) {
+    throw new Error("Public Linux artifact has an invalid typography manifest contract.");
   }
   if (manifest.cubismCoreBundled !== false)
     throw new Error("Public Linux artifact must declare Cubism Core as not bundled.");
@@ -101,7 +153,8 @@ export function auditLinuxPublicArtifact(root = LINUX_BUILD_ROOT, options = {}) 
     files: files.length,
     bytes: files.reduce((sum, file) => sum + fs.statSync(file).size, 0),
     localSttBytes: stt.bytes,
-    localSttFiles: stt.files
+    localSttFiles: stt.files,
+    typographyFontBytes: typography.fontBytes
   };
 }
 
@@ -111,7 +164,7 @@ if (isMain) {
   try {
     const result = auditLinuxPublicArtifact(process.argv[2] || LINUX_BUILD_ROOT);
     console.info(
-      `[linux-public-audit] ${result.files} files, ${result.bytes} bytes; local-stt ${result.localSttFiles} files, ${result.localSttBytes} bytes`
+      `[linux-public-audit] ${result.files} files, ${result.bytes} bytes; local-stt ${result.localSttFiles} files, ${result.localSttBytes} bytes; typography ${result.typographyFontBytes} bytes`
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
