@@ -4,9 +4,10 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readPortablePackageIdentity, resolvePortableStateDirs, resolvePortableStateRoot } from './portable-state.mjs';
+import { portableSecretNamespace, readPortablePackageIdentity, resolvePortableStateDirs, resolvePortableStateRoot } from './portable-state.mjs';
 const root = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
 const packageIdentity = readPortablePackageIdentity(root);
+const secretNamespace = portableSecretNamespace(packageIdentity);
 const state = resolvePortableStateRoot({ packageRoot: root, identity: packageIdentity });
 const dirs = resolvePortableStateDirs(state);
 process.umask(0o077);
@@ -43,8 +44,8 @@ try {
   } else if (command === 'start') {
     const runtimePort = 16121, webPort = 15173, sttPort = 19876;
     for (const port of [runtimePort, webPort, sttPort]) await available(port);
-    // Deliberately inherit no provider credentials, installed roots, or service commands.
-    // Only GUI session coordinates cross the portable isolation boundary.
+    // Parent provider credentials and Installed state never cross the Portable boundary.
+    // Durable Product configuration is restored from this release's versioned config root.
     const guiSessionEnv = Object.fromEntries(
       ['DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY']
         .filter(key => typeof process.env[key] === 'string' && process.env[key])
@@ -57,10 +58,12 @@ try {
       TMPDIR: dirs.tmp, TMP: dirs.tmp, TEMP: dirs.tmp,
       YUVI_CONFIG_ROOT: dirs.config, YUVI_DATA_ROOT: dirs.data, YUVI_CACHE_ROOT: dirs.cache,
       YUVI_RUNTIME_ENV_DIR: dirs.config, YUVI_SUPERVISOR_STATE_ROOT: dirs.supervisor,
-      YUVI_PACKAGED_EXTERNAL_SIDECARS: '1', YUVI_POSTGRES_MODE: 'external',
-      YUVI_AUTOSTART_MEM0: '0', YUVI_AUTOSTART_LOCAL_STT: '0', YUVI_AUTOSTART_TTS: '0',
+      YUVI_SECRET_NAMESPACE: secretNamespace,
+      // A9 owns packaged Mem0/PostgreSQL distribution and lifecycle. Until those artifacts are
+      // present, retain only the explicit external-memory bootstrap guard instead of forcing
+      // unrelated Product routing/defaults back to legacy values on every Portable restart.
+      YUVI_PACKAGED_EXTERNAL_SIDECARS: '1', YUVI_POSTGRES_MODE: 'external', YUVI_AUTOSTART_MEM0: '0',
       SERVER_HOST: '127.0.0.1', SERVER_PORT: String(runtimePort), LOCAL_STT_BASE_URL: `http://127.0.0.1:${sttPort}`,
-      MEMORY_BACKEND: 'legacy',
       LOCAL_TTS_BASE_URL: 'http://127.0.0.1:19881', GPT_SOVITS_TTS_UPSTREAM_URL: 'http://127.0.0.1:19880'
     };
     const node = path.join(root, 'runtime', 'node');

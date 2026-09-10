@@ -8,6 +8,10 @@ pub const SECRET_OPENAI_COMPATIBLE_API_KEY: &str = "models.openaiCompatibleApiKe
 pub const SECRET_DATABASE_URL: &str = "memory.databaseUrl";
 pub const SECRET_MEMORY_LLM_API_KEY: &str = "memory.llmApiKey";
 pub const SECRET_POSTGRES_LOCAL_PASSWORD: &str = "postgres.localPassword";
+pub const SECRET_NAMESPACE_ENV: &str = "YUVI_SECRET_NAMESPACE";
+
+const INSTALLED_SECRET_SERVICE: &str = "YUVI";
+const PORTABLE_SECRET_SERVICE_PREFIX: &str = "YUVI-portable-";
 
 pub fn generate_postgres_password() -> Result<String, String> {
     let mut bytes = [0u8; 32];
@@ -135,6 +139,8 @@ impl SecretStore for MemorySecretStore {
 }
 
 /// Platform secret store via `keyring`: Windows Credential Manager or Linux Secret Service.
+/// Installed YUVI retains the historical `YUVI` service. Portable supplies a validated,
+/// release-scoped service through YUVI_SECRET_NAMESPACE so credentials never cross instances.
 pub struct PlatformSecretStore;
 
 impl PlatformSecretStore {
@@ -148,6 +154,35 @@ impl PlatformSecretStore {
             other => Err(format!("unsupported secret key: {other}")),
         }
     }
+
+    fn service_from_value(value: Option<&str>) -> Result<String, String> {
+        let Some(raw) = value else {
+            return Ok(INSTALLED_SECRET_SERVICE.to_string());
+        };
+        if raw != raw.trim() {
+            return Err("YUVI secret namespace is invalid".into());
+        }
+        let Some(version) = raw.strip_prefix(PORTABLE_SECRET_SERVICE_PREFIX) else {
+            return Err("YUVI secret namespace is invalid".into());
+        };
+        let parts: Vec<_> = version.split('.').collect();
+        if parts.len() != 3
+            || parts
+                .iter()
+                .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Err("YUVI secret namespace is invalid".into());
+        }
+        Ok(raw.to_string())
+    }
+
+    fn service() -> Result<String, String> {
+        match std::env::var(SECRET_NAMESPACE_ENV) {
+            Ok(value) => Self::service_from_value(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::service_from_value(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err("YUVI secret namespace is invalid".into()),
+        }
+    }
 }
 
 impl SecretStore for PlatformSecretStore {
@@ -155,7 +190,8 @@ impl SecretStore for PlatformSecretStore {
         #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
-            let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
+            let service = Self::service()?;
+            let entry = keyring::Entry::new(&service, target).map_err(|e| e.to_string())?;
             match entry.get_password() {
                 Ok(value) => Ok(Some(value)),
                 Err(keyring::Error::NoEntry) => Ok(None),
@@ -166,6 +202,7 @@ impl SecretStore for PlatformSecretStore {
         #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
+            let _ = Self::service()?;
             Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
@@ -178,12 +215,14 @@ impl SecretStore for PlatformSecretStore {
         #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
-            let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
+            let service = Self::service()?;
+            let entry = keyring::Entry::new(&service, target).map_err(|e| e.to_string())?;
             entry.set_password(trimmed).map_err(|e| e.to_string())
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
+            let _ = Self::service()?;
             Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
@@ -192,7 +231,8 @@ impl SecretStore for PlatformSecretStore {
         #[cfg(any(windows, target_os = "linux"))]
         {
             let target = Self::map_key(key)?;
-            let entry = keyring::Entry::new("YUVI", target).map_err(|e| e.to_string())?;
+            let service = Self::service()?;
+            let entry = keyring::Entry::new(&service, target).map_err(|e| e.to_string())?;
             match entry.delete_credential() {
                 Ok(()) => Ok(()),
                 Err(keyring::Error::NoEntry) => Ok(()),
@@ -202,6 +242,7 @@ impl SecretStore for PlatformSecretStore {
         #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = Self::map_key(key)?;
+            let _ = Self::service()?;
             Err("Platform secret storage is not supported on this operating system".to_string())
         }
     }
@@ -226,5 +267,32 @@ mod tests {
             WIN_CRED_POSTGRES_LOCAL
         );
         assert!(PlatformSecretStore::map_key("memory.unknown").is_err());
+    }
+
+    #[test]
+    fn portable_secret_service_is_version_scoped_and_invalid_values_fail_closed() {
+        assert_eq!(
+            PlatformSecretStore::service_from_value(None).unwrap(),
+            INSTALLED_SECRET_SERVICE
+        );
+        assert_eq!(
+            PlatformSecretStore::service_from_value(Some("YUVI-portable-0.1.2")).unwrap(),
+            "YUVI-portable-0.1.2"
+        );
+        assert_eq!(
+            PlatformSecretStore::service_from_value(Some("YUVI-portable-12.34.56")).unwrap(),
+            "YUVI-portable-12.34.56"
+        );
+        for invalid in [
+            "",
+            "YUVI",
+            "YUVI-portable-0.1",
+            "YUVI-portable-0.1.2.3",
+            "YUVI-portable-../0.1.2",
+            " YUVI-portable-0.1.2",
+            "YUVI-portable-0.1.2 ",
+        ] {
+            assert!(PlatformSecretStore::service_from_value(Some(invalid)).is_err());
+        }
     }
 }
