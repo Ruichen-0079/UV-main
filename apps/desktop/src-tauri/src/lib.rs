@@ -244,12 +244,21 @@ pub fn run() {
         if let Err(error) = std::thread::Builder::new()
           .name("yuvi-durable-memory-boot".into())
           .spawn(move || {
-            if let Err(error) = durable_memory_boot::bootstrap_attached_linux(&boot_app) {
-              eprintln!("[yuvi-desktop] durable Memory bootstrap skipped: {error}");
+            supervisor::mark_attach_bootstrap_started(&boot_app);
+            match durable_memory_boot::bootstrap_attached_linux(&boot_app) {
+              Ok(()) => supervisor::mark_attach_bootstrap_ready(&boot_app),
+              Err(error) => {
+                eprintln!("[yuvi-desktop] durable Memory bootstrap failed: {error}");
+                supervisor::mark_attach_bootstrap_failed(&boot_app, error);
+              }
             }
           })
         {
           eprintln!("[yuvi-desktop] durable Memory bootstrap thread failed: {error}");
+          supervisor::mark_attach_bootstrap_failed(
+            &app.handle(),
+            format!("bootstrap thread failed: {error}"),
+          );
         }
       }
 

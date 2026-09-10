@@ -103,6 +103,8 @@ pub fn public_env_overrides(settings: &UserSettings) -> BTreeMap<String, String>
         settings.tts.upstream_url.clone(),
     );
 
+    apply_portable_attach_endpoint_overrides(settings, &mut env);
+
     // TTS provider/model selection belongs to ProviderRegistry configuration.
     // Desktop enable/lifecycle preferences must not select a concrete voice.
 
@@ -340,6 +342,7 @@ pub fn supervisor_config_push(
     settings: &UserSettings,
     secrets: &dyn SecretStore,
 ) -> Result<SupervisorConfigPush, String> {
+    validate_portable_attach_endpoint_overrides(settings)?;
     Ok(SupervisorConfigPush {
         env: combined_env_for_supervisor(settings, secrets)?,
         unset_env: unset_env_for_supervisor(settings, secrets)?,
@@ -362,4 +365,73 @@ fn split_http_host_port(url: &str) -> Option<(String, String)> {
         .map(|p| p.to_string())
         .unwrap_or_else(|| "80".into());
     Some((host, port))
+}
+
+fn apply_portable_attach_endpoint_overrides(
+    settings: &UserSettings,
+    env: &mut BTreeMap<String, String>,
+) {
+    if std::env::var("YUVI_DESKTOP_SUPERVISOR_BINDING").ok().as_deref() != Some("attach") {
+        return;
+    }
+
+    if settings.runtime.mode == ServiceMode::Managed {
+        if let Some(port) = portable_port("YUVI_PORTABLE_RUNTIME_PORT") {
+            env.insert("SERVER_HOST".into(), "127.0.0.1".into());
+            env.insert("SERVER_PORT".into(), port.to_string());
+        }
+    }
+
+    if settings.memory.enabled
+        && settings.memory.mode == ServiceMode::Managed
+        && matches!(settings.memory.backend, MemoryBackend::Mem0)
+    {
+        if let Some(port) = portable_port("YUVI_PORTABLE_MEM0_PORT") {
+            env.insert("MEM0_BASE_URL".into(), format!("http://127.0.0.1:{port}"));
+        }
+    }
+
+    if settings.stt.provider == SttProvider::Local && settings.stt.mode == ServiceMode::Managed {
+        if let Some(port) = portable_port("YUVI_PORTABLE_LOCAL_STT_PORT") {
+            env.insert("LOCAL_STT_BASE_URL".into(), format!("http://127.0.0.1:{port}"));
+        }
+    }
+}
+
+fn validate_portable_attach_endpoint_overrides(settings: &UserSettings) -> Result<(), String> {
+    if std::env::var("YUVI_DESKTOP_SUPERVISOR_BINDING").ok().as_deref() != Some("attach") {
+        return Ok(());
+    }
+    let required = [
+        (settings.runtime.mode == ServiceMode::Managed, "Runtime"),
+        (
+            settings.memory.enabled
+                && settings.memory.mode == ServiceMode::Managed
+                && matches!(settings.memory.backend, MemoryBackend::Mem0),
+            "Mem0",
+        ),
+        (
+            settings.stt.provider == SttProvider::Local && settings.stt.mode == ServiceMode::Managed,
+            "Local STT",
+        ),
+    ];
+    let variables = [
+        "YUVI_PORTABLE_RUNTIME_PORT",
+        "YUVI_PORTABLE_MEM0_PORT",
+        "YUVI_PORTABLE_LOCAL_STT_PORT",
+    ];
+    for ((enabled, label), variable) in required.into_iter().zip(variables) {
+        if enabled && portable_port(variable).is_none() {
+            return Err(format!(
+                "Portable attach endpoint for {label} is unavailable."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn portable_port(variable: &str) -> Option<u16> {
+    let value = std::env::var(variable).ok()?;
+    let port = value.parse::<u16>().ok()?;
+    (port > 0).then_some(port)
 }

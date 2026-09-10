@@ -55,8 +55,8 @@ try {
       throw new Error('Usage: ./yuvi cubism-core [status|import /path/to/live2dcubismcore.min.js]');
     }
   } else if (command === 'start') {
-    const runtimePort = 16121, webPort = 15173, sttPort = 19876;
-    for (const port of [runtimePort, webPort, sttPort]) await available(port);
+    const runtimePort = 16121, mem0Port = 16131, webPort = 15173, sttPort = 19876;
+    for (const port of [runtimePort, mem0Port, webPort, sttPort]) await available(port);
     // Parent provider credentials and Installed state never cross the Portable boundary.
     // Durable Product configuration and secrets are restored only from this release namespace.
     const guiSessionEnv = Object.fromEntries(
@@ -72,7 +72,8 @@ try {
       YUVI_CONFIG_ROOT: dirs.config, YUVI_DATA_ROOT: dirs.data, YUVI_CACHE_ROOT: dirs.cache,
       YUVI_RUNTIME_ENV_DIR: dirs.config, YUVI_SUPERVISOR_STATE_ROOT: dirs.supervisor,
       YUVI_SECRET_NAMESPACE: secretNamespace,
-      SERVER_HOST: '127.0.0.1', SERVER_PORT: String(runtimePort), LOCAL_STT_BASE_URL: `http://127.0.0.1:${sttPort}`,
+      YUVI_PORTABLE_RUNTIME_PORT: String(runtimePort), YUVI_PORTABLE_MEM0_PORT: String(mem0Port), YUVI_PORTABLE_LOCAL_STT_PORT: String(sttPort),
+      SERVER_HOST: '127.0.0.1', SERVER_PORT: String(runtimePort), MEM0_BASE_URL: `http://127.0.0.1:${mem0Port}`, LOCAL_STT_BASE_URL: `http://127.0.0.1:${sttPort}`,
       LOCAL_TTS_BASE_URL: 'http://127.0.0.1:19881', GPT_SOVITS_TTS_UPSTREAM_URL: 'http://127.0.0.1:19880'
     };
     const node = path.join(root, 'runtime', 'node');
@@ -119,25 +120,6 @@ try {
     if (!closing) {
       desktop = spawn(desktopShell, [], { cwd: state, env: desktopEnv, stdio: 'inherit' });
       desktop.once('error', stop); desktop.once('exit', stop);
-    }
-
-    // The attached desktop now pushes Product config + private secret and sequences
-    // PostgreSQL -> migrations -> Mem0 -> Runtime through the existing Supervisor.
-    const runtimeDeadline = Date.now() + 120_000;
-    while (!closing) {
-      try {
-        const status = await control('/v1/status');
-        const runtime = status.services.find(s => s.id === 'runtime');
-        if (runtime?.ownership === 'external') throw new Error('Runtime port belongs to another instance.');
-        if (runtime?.status === 'healthy' && runtime.ownership === 'owned') break;
-      } catch (error) {
-        if (error.message.includes('another instance')) { stop(); throw error; }
-      }
-      if (Date.now() >= runtimeDeadline) { stop(); throw new Error('Runtime did not become ready after durable Memory bootstrap. Inspect the portable DATA instances logs.'); }
-      await new Promise(r => setTimeout(r, 250));
-    }
-
-    if (!closing) {
       web = spawn(node, [path.join(root, 'web', 'static-server.mjs'), '--root', path.join(root, 'web', 'dist'), '--port', String(webPort), '--runtime-port', String(runtimePort)], { cwd: state, env, stdio: 'inherit' });
       web.once('error', stop); web.once('exit', stop);
       console.log(`YUVI desktop shell started. Browser fallback: http://127.0.0.1:${webPort}/#/webui\nRun ./yuvi stop to shut down.`);

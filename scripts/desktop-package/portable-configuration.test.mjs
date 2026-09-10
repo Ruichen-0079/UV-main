@@ -43,14 +43,14 @@ test("Portable launcher keeps instance identity isolated while restoring durable
   assert.doesNotMatch(launcher, /YUVI_AUTOSTART_MEM0:\s*'0'/);
 });
 
-test("Portable starts Tauri after the control plane but before waiting for Runtime", () => {
+test("Portable starts Tauri after the control plane without owning Runtime bootstrap", () => {
   const controlReady = launcher.indexOf("const controlDeadline");
   const desktopStart = launcher.indexOf("desktop = spawn(desktopShell");
   const runtimeWait = launcher.indexOf("const runtimeDeadline");
   assert.ok(controlReady >= 0);
   assert.ok(desktopStart > controlReady);
-  assert.ok(runtimeWait > desktopStart);
-  assert.match(launcher, /durable Memory bootstrap/);
+  assert.equal(runtimeWait, -1);
+  assert.match(launcher, /DesktopSupervisor|desktop.*Supervisor|service lifecycle remains DesktopSupervisor/);
 });
 
 test("Portable secret namespace follows the validated release version", () => {

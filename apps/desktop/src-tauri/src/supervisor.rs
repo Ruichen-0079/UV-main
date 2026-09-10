@@ -29,6 +29,16 @@ struct SupervisorInner {
   owns_supervisor_process: bool,
   poll_stop: bool,
   shutting_down: bool,
+  attach_bootstrap: AttachBootstrapState,
+}
+
+#[derive(Default)]
+enum AttachBootstrapState {
+  #[default]
+  Pending,
+  Running,
+  Ready,
+  Failed(String),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -48,9 +58,23 @@ struct EndpointFile {
 pub struct DesktopRuntimeBinding {
   mode: String,
   ready: bool,
+  phase: DesktopRuntimeBindingPhase,
   instance_id: Option<String>,
   runtime_url: Option<String>,
   error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+enum DesktopRuntimeBindingPhase {
+  Starting,
+  Ready,
+  Failed,
+}
+
+enum DesktopRuntimeBindingResolution {
+  Starting { instance_id: String },
+  Ready { instance_id: String, runtime_url: String },
 }
 
 #[tauri::command]
@@ -67,22 +91,7 @@ pub fn get_desktop_runtime_binding(
   state: State<'_, SupervisorState>,
 ) -> DesktopRuntimeBinding {
   let mode = if attach_existing_requested() { "attach" } else { "owned" };
-  match resolve_desktop_runtime_binding(&state, mode == "attach") {
-    Ok((instance_id, runtime_url)) => DesktopRuntimeBinding {
-      mode: mode.to_string(),
-      ready: true,
-      instance_id: Some(instance_id),
-      runtime_url: Some(runtime_url),
-      error: None,
-    },
-    Err(error) => DesktopRuntimeBinding {
-      mode: mode.to_string(),
-      ready: false,
-      instance_id: None,
-      runtime_url: None,
-      error: Some(error),
-    },
-  }
+  project_desktop_runtime_binding(&state, mode == "attach", mode)
 }
 
 /// Explicit retry for the bounded attach-unavailable product state. It only
@@ -98,34 +107,13 @@ pub fn retry_desktop_runtime_binding(app: AppHandle) -> DesktopRuntimeBinding {
     };
     if needs_attach {
       if let Err(error) = attach_existing_supervisor(&app) {
-        return DesktopRuntimeBinding {
-          mode: mode.to_string(),
-          ready: false,
-          instance_id: None,
-          runtime_url: None,
-          error: Some(error),
-        };
+        return failed_runtime_binding(mode, error);
       }
     }
   }
 
   let state = app.state::<SupervisorState>();
-  match resolve_desktop_runtime_binding(&state, mode == "attach") {
-    Ok((instance_id, runtime_url)) => DesktopRuntimeBinding {
-      mode: mode.to_string(),
-      ready: true,
-      instance_id: Some(instance_id),
-      runtime_url: Some(runtime_url),
-      error: None,
-    },
-    Err(error) => DesktopRuntimeBinding {
-      mode: mode.to_string(),
-      ready: false,
-      instance_id: None,
-      runtime_url: None,
-      error: Some(error),
-    },
-  }
+  project_desktop_runtime_binding(&state, mode == "attach", mode)
 }
 
 #[tauri::command]
@@ -210,10 +198,32 @@ pub(crate) fn attach_existing_supervisor(app: &AppHandle) -> Result<(), String> 
     guard.owns_supervisor_process = false;
     guard.poll_stop = false;
     guard.shutting_down = false;
+    guard.attach_bootstrap = AttachBootstrapState::Pending;
   }
 
   start_status_poller(app.clone());
   Ok(())
+}
+
+pub(crate) fn mark_attach_bootstrap_started(app: &AppHandle) {
+  if let Ok(mut state) = app.state::<SupervisorState>().inner.lock() {
+    // A terminal failure is not overwritten by a late worker callback.
+    if !matches!(state.attach_bootstrap, AttachBootstrapState::Failed(_)) {
+      state.attach_bootstrap = AttachBootstrapState::Running;
+    }
+  }
+}
+
+pub(crate) fn mark_attach_bootstrap_ready(app: &AppHandle) {
+  if let Ok(mut state) = app.state::<SupervisorState>().inner.lock() {
+    state.attach_bootstrap = AttachBootstrapState::Ready;
+  }
+}
+
+pub(crate) fn mark_attach_bootstrap_failed(app: &AppHandle, error: String) {
+  if let Ok(mut state) = app.state::<SupervisorState>().inner.lock() {
+    state.attach_bootstrap = AttachBootstrapState::Failed(error);
+  }
 }
 
 pub fn bootstrap_supervisor(
@@ -547,6 +557,11 @@ mod tests {
     let error = super::runtime_binding_from_snapshot(&non_loopback, "portable-a", true)
       .expect_err("non-loopback Runtime origin must be rejected");
     assert!(error.contains("loopback"));
+
+    assert!(!super::attach_runtime_phase(Some("stopped"), Some("none")).unwrap());
+    assert!(!super::attach_runtime_phase(Some("starting"), Some("owned")).unwrap());
+    assert!(super::attach_runtime_phase(Some("healthy"), Some("owned")).unwrap());
+    assert!(super::attach_runtime_phase(Some("external"), Some("external")).is_err());
   }
 
   #[test]
@@ -1332,11 +1347,110 @@ fn require_endpoint_identity(
 fn resolve_desktop_runtime_binding(
   state: &State<'_, SupervisorState>,
   require_owned_runtime: bool,
-) -> Result<(String, String), String> {
+) -> Result<DesktopRuntimeBindingResolution, String> {
   let (base, token, expected_instance_id) = require_endpoint_identity(state)?;
   let snapshot = http_json("GET", &format!("{base}/v1/status"), None, Some(&token))
     .map_err(|error| format!("bound Supervisor status unavailable: {error}"))?;
-  runtime_binding_from_snapshot(&snapshot, &expected_instance_id, require_owned_runtime)
+  let snapshot_instance_id = snapshot
+    .get("instanceId")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "bound Supervisor status is missing instance identity".to_string())?;
+  if snapshot_instance_id != expected_instance_id {
+    return Err("bound Supervisor status identity mismatch".to_string());
+  }
+  if require_owned_runtime {
+    if let Some(error) = attach_bootstrap_failure(state) {
+      return Err(error);
+    }
+  }
+  let (instance_id, runtime_url) =
+    runtime_binding_from_snapshot(&snapshot, &expected_instance_id, false)?;
+  if !require_owned_runtime {
+    return Ok(DesktopRuntimeBindingResolution::Ready {
+      instance_id,
+      runtime_url,
+    });
+  }
+  let runtime = snapshot
+    .get("services")
+    .and_then(Value::as_array)
+    .and_then(|services| {
+      services
+        .iter()
+        .find(|service| service.get("id").and_then(Value::as_str) == Some("runtime"))
+    })
+    .ok_or_else(|| "bound Supervisor did not project a Runtime service".to_string())?;
+  match attach_runtime_phase(
+    runtime.get("status").and_then(Value::as_str),
+    runtime.get("ownership").and_then(Value::as_str),
+  )? {
+    true => Ok(DesktopRuntimeBindingResolution::Ready {
+      instance_id,
+      runtime_url,
+    }),
+    false => Ok(DesktopRuntimeBindingResolution::Starting { instance_id }),
+  }
+}
+
+fn project_desktop_runtime_binding(
+  state: &State<'_, SupervisorState>,
+  require_owned_runtime: bool,
+  mode: &str,
+) -> DesktopRuntimeBinding {
+  match resolve_desktop_runtime_binding(state, require_owned_runtime) {
+    Ok(DesktopRuntimeBindingResolution::Ready {
+      instance_id,
+      runtime_url,
+    }) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: true,
+      phase: DesktopRuntimeBindingPhase::Ready,
+      instance_id: Some(instance_id),
+      runtime_url: Some(runtime_url),
+      error: None,
+    },
+    Ok(DesktopRuntimeBindingResolution::Starting { instance_id }) => DesktopRuntimeBinding {
+      mode: mode.to_string(),
+      ready: false,
+      phase: DesktopRuntimeBindingPhase::Starting,
+      instance_id: Some(instance_id),
+      runtime_url: None,
+      error: None,
+    },
+    Err(error) => failed_runtime_binding(mode, error),
+  }
+}
+
+fn failed_runtime_binding(mode: &str, error: String) -> DesktopRuntimeBinding {
+  DesktopRuntimeBinding {
+    mode: mode.to_string(),
+    ready: false,
+    phase: DesktopRuntimeBindingPhase::Failed,
+    instance_id: None,
+    runtime_url: None,
+    error: Some(error),
+  }
+}
+
+fn attach_bootstrap_failure(state: &State<'_, SupervisorState>) -> Option<String> {
+  let guard = state.inner.lock().ok()?;
+  match &guard.attach_bootstrap {
+    AttachBootstrapState::Failed(error) => Some(format!("bound Supervisor Runtime bootstrap failed: {error}")),
+    _ => None,
+  }
+}
+
+fn attach_runtime_phase(status: Option<&str>, ownership: Option<&str>) -> Result<bool, String> {
+  if ownership == Some("external") {
+    return Err("attach-only desktop Runtime is not owned by its bound Supervisor".to_string());
+  }
+  match (status, ownership) {
+    (Some("healthy"), Some("owned")) => Ok(true),
+    (Some("stopped"), None | Some("none") | Some("owned"))
+    | (Some("starting"), None | Some("none") | Some("owned")) => Ok(false),
+    (Some("unavailable"), _) => Err("bound Supervisor Runtime is unavailable".to_string()),
+    _ => Err("bound Supervisor Runtime state is invalid".to_string()),
+  }
 }
 
 fn runtime_binding_from_snapshot(
