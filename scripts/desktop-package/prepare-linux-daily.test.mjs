@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { LINUX_LOCAL_STT_MANIFEST } from "./build-local-stt.mjs";
+import {
+  readPortablePackageIdentity,
+  resolvePortableStateDirs,
+  resolvePortableStateRoot
+} from "./portable-state.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -16,6 +21,7 @@ test("linux daily prepare packages the Local STT sidecar instead of adapter sour
   assert.match(source, /tauri-desktop-shell/);
   assert.match(source, /YUVI_LINUX_DESKTOP_BINARY/);
   assert.match(source, /yuvi-desktop-launcher/);
+  assert.match(source, /portable-state\.mjs/);
   assert.equal(
     source.includes('copyTreeFiltered(path.join(REPO_ROOT, "services", "local-stt")'),
     false
@@ -43,6 +49,13 @@ test("linux desktop launchers prefer XWayland for reliable topmost semantics", (
   assert.match(portableLauncher, /guiSessionEnv\.DISPLAY/);
   assert.match(portableLauncher, /desktopEnv\.GDK_BACKEND = 'x11'/);
   assert.match(portableLauncher, /process\.env\.GDK_BACKEND/);
+  assert.match(portableLauncher, /readPortablePackageIdentity\(root\)/);
+  assert.match(portableLauncher, /resolvePortableStateRoot/);
+  assert.match(portableLauncher, /YUVI_CONFIG_ROOT: dirs\.config/);
+  assert.match(portableLauncher, /YUVI_DATA_ROOT: dirs\.data/);
+  assert.match(portableLauncher, /YUVI_CACHE_ROOT: dirs\.cache/);
+  assert.match(portableLauncher, /YUVI_SUPERVISOR_STATE_ROOT: dirs\.supervisor/);
+  assert.match(portableLauncher, /TMPDIR: dirs\.tmp/);
 });
 
 test("linux daily installer leaves packaged Local STT stopped without a route", () => {
@@ -144,3 +157,160 @@ test(
     }
   }
 );
+
+
+function writePortableManifest(packageRoot, version, checkoutSha) {
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "install-manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "yuvi-linux-daily-packaged",
+      platform: "linux-x64",
+      checkoutSha,
+      version
+    })
+  );
+}
+
+test("portable package identity comes from install-manifest and rejects malformed identity", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-portable-identity-"));
+  try {
+    writePortableManifest(fixture, "0.1.2", "2".repeat(40));
+    assert.deepEqual(readPortablePackageIdentity(fixture), {
+      version: "0.1.2",
+      checkoutSha: "2".repeat(40)
+    });
+
+    fs.writeFileSync(
+      path.join(fixture, "install-manifest.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "yuvi-linux-daily-packaged",
+        platform: "linux-x64",
+        checkoutSha: "2".repeat(40),
+        version: "../0.1.2"
+      })
+    );
+    assert.throws(() => readPortablePackageIdentity(fixture), /identity is invalid/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("new Portable release does not adopt old Product or Live2D state", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-portable-state-version-"));
+  try {
+    const xdgData = path.join(fixture, "xdg-data");
+    const xdgConfig = path.join(fixture, "xdg-config");
+    const oldPackage = path.join(fixture, "packages", "old");
+    const newPackage = path.join(fixture, "packages", "new");
+    writePortableManifest(oldPackage, "0.1.1", "1".repeat(40));
+    writePortableManifest(newPackage, "0.1.2", "2".repeat(40));
+
+    const env = { XDG_DATA_HOME: xdgData };
+    const oldVersionedState = resolvePortableStateRoot({
+      packageRoot: oldPackage,
+      env,
+      home: fixture
+    });
+    const newState = resolvePortableStateRoot({
+      packageRoot: newPackage,
+      env,
+      home: fixture
+    });
+    assert.equal(oldVersionedState, path.join(xdgData, "YUVI", "portable", "0.1.1"));
+    assert.equal(newState, path.join(xdgData, "YUVI", "portable", "0.1.2"));
+    assert.notEqual(newState, oldVersionedState);
+
+    // Exact v0.1.1 baseline before A2: all Portable state lived directly under
+    // .../YUVI/portable/{config,data,cache,supervisor,...}.
+    const legacyState = path.join(xdgData, "YUVI", "portable");
+    const legacyConfig = path.join(legacyState, "config");
+    const legacyLive2d = path.join(legacyState, "data", "yuvi", "live2d-models", "fake-model");
+    const legacySupervisor = path.join(legacyState, "supervisor");
+    const legacyCache = path.join(legacyState, "cache");
+    fs.mkdirSync(legacyConfig, { recursive: true });
+    fs.mkdirSync(legacyLive2d, { recursive: true });
+    fs.mkdirSync(legacySupervisor, { recursive: true });
+    fs.mkdirSync(legacyCache, { recursive: true });
+    fs.writeFileSync(
+      path.join(legacyConfig, "product-settings.json"),
+      JSON.stringify({ revision: 11, activeModel: "old-model" })
+    );
+    fs.writeFileSync(
+      path.join(legacyLive2d, "entry.json"),
+      JSON.stringify({ name: "old-model" })
+    );
+    fs.writeFileSync(path.join(legacySupervisor, "active-instance.json"), '{"instanceId":"old"}');
+    fs.writeFileSync(path.join(legacyCache, "old.cache"), "old-cache");
+
+    const newDirs = resolvePortableStateDirs(newState);
+    // Simulate the newer package's first launch directory initialization.
+    for (const dir of Object.values(newDirs)) fs.mkdirSync(dir, { recursive: true });
+
+    const newProductSettings = path.join(newDirs.config, "product-settings.json");
+    const newLive2dRoot = path.join(newDirs.data, "yuvi", "live2d-models");
+    const newSupervisorPointer = path.join(newDirs.supervisor, "active-instance.json");
+    const newOldCache = path.join(newDirs.cache, "old.cache");
+    assert.equal(fs.existsSync(newProductSettings), false);
+    assert.equal(fs.existsSync(path.join(newLive2dRoot, "fake-model")), false);
+    assert.equal(fs.existsSync(newSupervisorPointer), false);
+    assert.equal(fs.existsSync(newOldCache), false);
+
+    // Old v0.1.1 state is preserved exactly; A2 performs no migration/deletion.
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(legacyConfig, "product-settings.json"), "utf8")),
+      { revision: 11, activeModel: "old-model" }
+    );
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(legacyLive2d, "entry.json"), "utf8")),
+      { name: "old-model" }
+    );
+    assert.equal(
+      fs.readFileSync(path.join(legacySupervisor, "active-instance.json"), "utf8"),
+      '{"instanceId":"old"}'
+    );
+    assert.equal(fs.readFileSync(path.join(legacyCache, "old.cache"), "utf8"), "old-cache");
+
+    // Installed roots remain separate from the Portable release namespace.
+    const installedConfig = path.join(xdgConfig, "YUVI");
+    const installedSupervisor = path.join(xdgData, "YUVI", "DesktopSupervisor");
+    assert.equal(newDirs.config.startsWith(installedConfig + path.sep), false);
+    assert.equal(newDirs.supervisor.startsWith(installedSupervisor + path.sep), false);
+    assert.notEqual(newDirs.config, installedConfig);
+    assert.notEqual(newDirs.supervisor, installedSupervisor);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("same-version relocation keeps the same Portable namespace and explicit override remains exact", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-portable-relocation-"));
+  try {
+    const xdgData = path.join(fixture, "xdg-data");
+    const packageA = path.join(fixture, "extract-a");
+    const packageB = path.join(fixture, "移动后的 YUVI");
+    writePortableManifest(packageA, "0.1.2", "a".repeat(40));
+    writePortableManifest(packageB, "0.1.2", "b".repeat(40));
+
+    const env = { XDG_DATA_HOME: xdgData };
+    const stateA = resolvePortableStateRoot({ packageRoot: packageA, env, home: fixture });
+    const stateB = resolvePortableStateRoot({ packageRoot: packageB, env, home: fixture });
+    assert.equal(stateA, stateB);
+    assert.equal(stateA, path.join(xdgData, "YUVI", "portable", "0.1.2"));
+
+    const explicit = path.join(fixture, "operator-selected-state");
+    const overridden = resolvePortableStateRoot({
+      packageRoot: packageB,
+      env: {
+        XDG_DATA_HOME: xdgData,
+        YUVI_PORTABLE_STATE_ROOT: explicit
+      },
+      home: fixture
+    });
+    assert.equal(overridden, explicit);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
