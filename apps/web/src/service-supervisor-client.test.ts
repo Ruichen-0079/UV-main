@@ -37,6 +37,7 @@ describe("desktop runtime binding boundary", () => {
     expect(
       parseDesktopRuntimeBinding({
         mode: "attach",
+        phase: "ready",
         ready: true,
         instanceId: "portable-a",
         runtimeUrl: "http://127.0.0.1:16121",
@@ -44,6 +45,7 @@ describe("desktop runtime binding boundary", () => {
       })
     ).toEqual({
       mode: "attach",
+      phase: "ready",
       ready: true,
       instanceId: "portable-a",
       runtimeUrl: "http://127.0.0.1:16121",
@@ -55,6 +57,7 @@ describe("desktop runtime binding boundary", () => {
     expect(
       parseDesktopRuntimeBinding({
         mode: "attach",
+        phase: "failed",
         ready: false,
         instanceId: null,
         runtimeUrl: null,
@@ -65,12 +68,31 @@ describe("desktop runtime binding boundary", () => {
     expect(
       parseDesktopRuntimeBinding({
         mode: "attach",
+        phase: "ready",
         ready: true,
         instanceId: "portable-a",
         runtimeUrl: null,
         error: null
       })
     ).toBeNull();
+
+    expect(
+      parseDesktopRuntimeBinding({
+        mode: "attach",
+        phase: "starting",
+        ready: false,
+        instanceId: "portable-a",
+        runtimeUrl: null,
+        error: null
+      })
+    ).toEqual({
+      mode: "attach",
+      phase: "starting",
+      ready: false,
+      instanceId: "portable-a",
+      runtimeUrl: null,
+      error: null
+    });
   });
 });
 

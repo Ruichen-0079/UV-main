@@ -24,6 +24,7 @@ export type SupervisorSnapshotDto = {
 
 export type DesktopRuntimeBindingDto = {
   mode: "attach" | "owned";
+  phase: "starting" | "ready" | "failed";
   ready: boolean;
   instanceId: string | null;
   runtimeUrl: string | null;
@@ -221,13 +222,20 @@ export function parseDesktopRuntimeBinding(value: unknown): DesktopRuntimeBindin
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
   const mode = record["mode"];
+  const phase = record["phase"];
   const ready = record["ready"];
   const instanceId = nullableBindingString(record["instanceId"]);
   const runtimeUrl = nullableBindingString(record["runtimeUrl"]);
   const error = nullableBindingString(record["error"]);
-  if ((mode !== "attach" && mode !== "owned") || typeof ready !== "boolean") return null;
-  if (ready && (!instanceId || !runtimeUrl)) return null;
-  return { mode, ready, instanceId, runtimeUrl, error };
+  if (
+    (mode !== "attach" && mode !== "owned") ||
+    (phase !== "starting" && phase !== "ready" && phase !== "failed") ||
+    typeof ready !== "boolean" ||
+    ready !== (phase === "ready")
+  )
+    return null;
+  if (phase === "ready" && (!instanceId || !runtimeUrl)) return null;
+  return { mode, phase, ready, instanceId, runtimeUrl, error };
 }
 
 function nullableBindingString(value: unknown): string | null {

@@ -61,6 +61,11 @@ test("linux desktop launchers prefer XWayland for reliable topmost semantics", (
   assert.match(portableLauncher, /YUVI_CACHE_ROOT: dirs\.cache/);
   assert.match(portableLauncher, /YUVI_SUPERVISOR_STATE_ROOT: dirs\.supervisor/);
   assert.match(portableLauncher, /TMPDIR: dirs\.tmp/);
+  assert.match(portableLauncher, /YUVI_PORTABLE_RUNTIME_PORT/);
+  assert.match(portableLauncher, /YUVI_PORTABLE_MEM0_PORT/);
+  assert.match(portableLauncher, /MEM0_BASE_URL/);
+  assert.doesNotMatch(portableLauncher, /runtimeDeadline/);
+  assert.equal((portableLauncher.match(/Runtime port belongs to another instance/g) || []).length, 1);
 });
 
 test("linux daily installer keeps Local STT route-controlled and no longer disables managed Memory", () => {

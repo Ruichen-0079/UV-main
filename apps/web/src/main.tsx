@@ -1,7 +1,8 @@
 import { fetchUserSettings } from "./user-settings-client.js";
 import {
   getDesktopRuntimeBinding,
-  retryDesktopRuntimeBinding
+  retryDesktopRuntimeBinding,
+  type DesktopRuntimeBindingDto
 } from "./service-supervisor-client.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import { initializeLocale, setLocale, LOCALE_STORAGE_KEY } from "./locale.js";
@@ -65,6 +66,30 @@ function RuntimeBindingUnavailable({ detail }: { detail: string }): JSX.Element 
   );
 }
 
+function RuntimeBootstrapLoading(): JSX.Element {
+  return (
+    <main className="runtime-binding-unavailable" role="status" aria-busy="true">
+      <div className="runtime-binding-unavailable__card">
+        <h1>YUVI Runtime starting</h1>
+        <p>The bound Portable Supervisor is bootstrapping its owned Runtime.</p>
+      </div>
+    </main>
+  );
+}
+
+async function waitForAttachRuntimeBinding(
+  binding: DesktopRuntimeBindingDto
+): Promise<DesktopRuntimeBindingDto> {
+  let current = binding;
+  while (current.phase === "starting") {
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    const next = await getDesktopRuntimeBinding();
+    if (!next) throw new Error("Bound Supervisor Runtime binding projection is unavailable.");
+    current = next;
+  }
+  return current;
+}
+
 initializeLocale();
 window.addEventListener("storage", event => { if (event.key === LOCALE_STORAGE_KEY) window.location.reload(); });
 
@@ -79,12 +104,21 @@ void resolveDesktopSurface().then(async (surface) => {
       const binding = await getDesktopRuntimeBinding();
       if (!binding) throw new Error("Desktop Runtime binding projection is unavailable.");
       bindingMode = binding.mode;
-      setDesktopRuntimeBinding(binding.mode, binding.ready ? binding.runtimeUrl : null);
-      if (binding.mode === "attach" && (!binding.ready || !binding.runtimeUrl)) {
+      if (binding.mode === "attach" && binding.phase === "starting") {
+        root.render(
+          <StrictMode>
+            <RuntimeBootstrapLoading />
+          </StrictMode>
+        );
+      }
+      const settled =
+        binding.mode === "attach" ? await waitForAttachRuntimeBinding(binding) : binding;
+      setDesktopRuntimeBinding(settled.mode, settled.phase === "ready" ? settled.runtimeUrl : null);
+      if (settled.mode === "attach" && (settled.phase !== "ready" || !settled.runtimeUrl)) {
         root.render(
           <StrictMode>
             <RuntimeBindingUnavailable
-              detail={binding.error ?? "The bound Supervisor/Runtime identity could not be verified."}
+              detail={settled.error ?? "The bound Supervisor/Runtime identity could not be verified."}
             />
           </StrictMode>
         );
