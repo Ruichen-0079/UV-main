@@ -50,6 +50,10 @@ import {
 } from "./speech-playback-correlation.js";
 import type { SpeechSegmentIdentity } from "./speech-identity.js";
 import { isTauriRuntime } from "./tauri-window.js";
+import {
+  readVisionImageAttachment,
+  type VisionImageAttachmentDraft
+} from "./vision-input.js";
 import { fetchUserSettings, subscribeUserSettingsChanged } from "./user-settings-client.js";
 import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
 import {
@@ -113,6 +117,8 @@ export function MainPage(): JSX.Element {
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
   const [input, setInput] = useState("");
+  const [imageAttachment, setImageAttachment] = useState<VisionImageAttachmentDraft | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [voiceCaptureStatus, setVoiceCaptureStatus] = useState<VoiceCaptureStatus>("idle");
   const [recordedAudio, setRecordedAudio] = useState<RecordedAudio | null>(null);
   const [voiceTranscription, setVoiceTranscription] = useState<TranscriptionResponse | null>(null);
@@ -122,6 +128,7 @@ export function MainPage(): JSX.Element {
 
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
   const busRef = useRef<CompanionBus | null>(null);
   // Product Main must subscribe to Runtime Presentation requests and forward them
@@ -492,7 +499,11 @@ export function MainPage(): JSX.Element {
       cancelActiveProactiveRequest(active);
     }
     const content = submit.submittedText;
+    const submittedAttachment = imageAttachment;
     setInput(submit.nextDraft);
+    setImageAttachment(null);
+    setAttachmentError(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
     setError(null);
     if (inputRef.current) {
       inputRef.current.style.height = "";
@@ -539,6 +550,14 @@ export function MainPage(): JSX.Element {
         readMemory,
         writeMemory,
         voiceOutput: shouldRequestTts,
+        ...(submittedAttachment
+          ? {
+              imageAttachment: {
+                name: submittedAttachment.name,
+                dataUrl: submittedAttachment.dataUrl
+              }
+            }
+          : {}),
         status: "completed"
       },
       assistant: {
@@ -555,6 +574,14 @@ export function MainPage(): JSX.Element {
         {
           sessionId,
           text: content,
+          ...(submittedAttachment
+            ? {
+                imageAttachment: {
+                  imageBase64: submittedAttachment.imageBase64,
+                  mimeType: submittedAttachment.mimeType
+                }
+              }
+            : {}),
           options: {
             readMemory,
             writeMemory,
@@ -1215,6 +1242,27 @@ export function MainPage(): JSX.Element {
     }
   }
 
+  async function selectImageAttachment(file: File | undefined): Promise<void> {
+    if (!file) return;
+    setAttachmentError(null);
+    try {
+      const attachment = await readVisionImageAttachment(file);
+      if (!mountedRef.current) return;
+      setImageAttachment(attachment);
+    } catch (caught) {
+      if (!mountedRef.current) return;
+      const message = caught instanceof Error ? caught.message : "The selected image could not be read.";
+      setAttachmentError(t(message));
+    }
+  }
+
+  function removeImageAttachment(): void {
+    setImageAttachment(null);
+    setAttachmentError(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
+    inputRef.current?.focus();
+  }
+
   const microphoneActive = liveSpeechStatus === "listening";
   const microphoneBusy = liveSpeechStatus === "requesting";
   const microphoneLabel = microphoneActive ? t("Stop Voice Mode") : t("Start Voice Mode");
@@ -1261,6 +1309,13 @@ export function MainPage(): JSX.Element {
                     }
                   >
                     <div className="yuvi-main-message-content">
+                      {message.role === "user" && message.imageAttachment && (
+                        <img
+                          className="yuvi-main-message-image"
+                          src={message.imageAttachment.dataUrl}
+                          alt={message.imageAttachment.name}
+                        />
+                      )}
                       <ChatMessageContent role={message.role} content={message.content} />
                       {message.role === "assistant" &&
                         message.status === "streaming" &&
@@ -1287,9 +1342,28 @@ export function MainPage(): JSX.Element {
 
         <div className="yuvi-main-composer-dock">
           <div className="yuvi-main-composer-wrap">
-            {voiceError && (
+            {imageAttachment && (
+              <div className="yuvi-main-attachment-preview">
+                <img src={imageAttachment.dataUrl} alt={imageAttachment.name} />
+                <div className="yuvi-main-attachment-copy">
+                  <span>{imageAttachment.name}</span>
+                  <small>{t("Image attached")}</small>
+                </div>
+                <button
+                  type="button"
+                  className="yuvi-main-attachment-remove"
+                  aria-label={t("Remove image")}
+                  title={t("Remove image")}
+                  onClick={removeImageAttachment}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
+            {(attachmentError || voiceError) && (
               <div className="yuvi-main-inline-error" role="alert">
-                {voiceError}
+                {attachmentError ?? voiceError}
               </div>
             )}
 
@@ -1302,6 +1376,29 @@ export function MainPage(): JSX.Element {
                 .filter(Boolean)
                 .join(" ")}
             >
+              <input
+                ref={imageInputRef}
+                className="yuvi-main-file-input"
+                type="file"
+                accept="image/png,image/jpeg"
+                aria-label={t("Image attachment")}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  void selectImageAttachment(file);
+                }}
+              />
+              <button
+                type="button"
+                className="yuvi-main-composer-button yuvi-main-attach"
+                disabled={requestStatus === "sending" || microphoneActive || microphoneBusy}
+                aria-label={t("Attach image")}
+                title={t("Attach image")}
+                onClick={() => imageInputRef.current?.click()}
+              >
+                <AttachIcon />
+              </button>
+
               <textarea
                 ref={inputRef}
                 className="yuvi-main-composer-input"
@@ -1329,6 +1426,7 @@ export function MainPage(): JSX.Element {
                 className="yuvi-main-composer-button yuvi-main-microphone"
                 disabled={
                   memoryPreferenceState !== "ready" ||
+                  imageAttachment !== null ||
                   microphoneBusy ||
                   voiceCaptureStatus !== "idle"
                 }
@@ -1382,6 +1480,20 @@ export function MainPage(): JSX.Element {
         </div>
       </main>
     </div>
+  );
+}
+
+function AttachIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 5v14M5 12h14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

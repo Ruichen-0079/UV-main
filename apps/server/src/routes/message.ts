@@ -6,6 +6,47 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 
+const MESSAGE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+/** 20 MiB raw image expands to ~26.7 MiB in base64 plus the JSON envelope. */
+export const MESSAGE_REQUEST_BODY_LIMIT = 30 * 1024 * 1024;
+
+const MessageImageAttachmentSchema = z
+  .object({
+    imageBase64: z.string().min(1),
+    mimeType: z.enum(["image/png", "image/jpeg"])
+  })
+  .superRefine((value, context) => {
+    const payload = value.imageBase64;
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 === 1) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "imageBase64 must be valid base64." });
+      return;
+    }
+    const paddingIndex = payload.indexOf("=");
+    if (paddingIndex >= 0 && payload.length % 4 !== 0) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "imageBase64 padding is invalid." });
+      return;
+    }
+    const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+    const estimatedBytes = Math.floor((payload.length * 3) / 4) - padding;
+    if (estimatedBytes <= 0 || estimatedBytes > MESSAGE_IMAGE_MAX_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Attached image must be non-empty and no larger than 20 MiB."
+      });
+      return;
+    }
+    const decoded = Buffer.from(payload, "base64");
+    if (
+      decoded.byteLength !== estimatedBytes ||
+      decoded.toString("base64").replace(/=+$/, "") !== payload.replace(/=+$/, "")
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "imageBase64 must be canonically encoded."
+      });
+    }
+  });
+
 export const MessageRequestSchema = z
   .object({
     sessionId: z.string().min(1).default("default"),
@@ -16,6 +57,7 @@ export const MessageRequestSchema = z
     personaId: z.string().min(1).optional(),
     speechObservationId: z.string().min(1).optional(),
     voiceOutput: z.boolean().optional(),
+    imageAttachment: MessageImageAttachmentSchema.optional(),
     options: z
       .object({
         tts: z.boolean().optional(),
@@ -90,6 +132,7 @@ export async function registerMessageRoutes(
         useMemory: memoryOptions.legacyUseMemory,
         readMemory: memoryOptions.readMemory,
         writeMemory: memoryOptions.writeMemory,
+        ...(input.data.imageAttachment ? { imageAttachment: input.data.imageAttachment } : {}),
         controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
       });
       if (response === null) {
@@ -133,8 +176,8 @@ export async function registerMessageRoutes(
     }
   }
 
-  app.post("/message", handleMessage);
-  app.post("/v1/messages", handleMessage);
+  app.post("/message", { bodyLimit: MESSAGE_REQUEST_BODY_LIMIT }, handleMessage);
+  app.post("/v1/messages", { bodyLimit: MESSAGE_REQUEST_BODY_LIMIT }, handleMessage);
 }
 
 export function normalizeMessageMemoryOptions(

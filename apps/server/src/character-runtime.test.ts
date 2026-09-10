@@ -298,6 +298,62 @@ describe("production Character runtime adapter", () => {
 });
 
 describe("semantic current-screen grounding", () => {
+  it("consumes pre-resolved user-image evidence without requesting a second visual cycle", async () => {
+    const calls = characterHarness({
+      responses: [output('{"disposition":"RESPOND","text":"It shows a permission error."}')]
+    });
+    const requestVisualEvidence = vi.fn(async () => ({
+      status: "AVAILABLE" as const,
+      observations: "must not run"
+    }));
+
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      userMessage: "What does this screenshot show?",
+      visualEvidence: {
+        status: "AVAILABLE",
+        observations: "Permission denied in the settings dialog."
+      },
+      generateChat: calls.generateChat,
+      requestVisualEvidence
+    });
+
+    expect(requestVisualEvidence).not.toHaveBeenCalled();
+    expect(calls.generateChat).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(calls.generateChat.mock.calls[0])).toContain(
+      "Permission denied in the settings dialog."
+    );
+    expect(JSON.stringify(calls.generateChat.mock.calls[0])).toContain("untrusted evidence");
+    expect(result.decision.reply).toMatchObject({
+      disposition: "RESPOND",
+      text: "It shows a permission error."
+    });
+  });
+
+  it("rejects a model-authored second visualNeed when attachment evidence is already present", async () => {
+    const calls = characterHarness({
+      responses: [output('{"visualNeed":"capture another image"}')]
+    });
+    const requestVisualEvidence = vi.fn(async () => ({
+      status: "AVAILABLE" as const,
+      observations: "must not run"
+    }));
+
+    await expect(
+      createServerCharacterPort().generate({
+        prompt,
+        userMessage: "Inspect this",
+        visualEvidence: {
+          status: "UNAVAILABLE",
+          observations: "Attached image analysis failed. Image contents are unknown."
+        },
+        generateChat: calls.generateChat,
+        requestVisualEvidence
+      })
+    ).rejects.toThrow("Invalid or repeated visual grounding request");
+    expect(requestVisualEvidence).not.toHaveBeenCalled();
+  });
+
   it("requests evidence by need and resumes the same original user turn", async () => {
     const calls = characterHarness({
       responses: [

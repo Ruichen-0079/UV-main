@@ -55,10 +55,12 @@ describe("MainPage product presentation", () => {
     }
   });
 
-  it("does not expose a fake image attachment before the multimodal atom", () => {
+  it("exposes one real PNG/JPEG image attachment input", () => {
     const markup = renderMainPage();
-    expect(markup).not.toContain('type="file"');
-    expect(markup).not.toContain("Attach image");
+    expect(markup).toContain('type="file"');
+    expect(markup).toContain('accept="image/png,image/jpeg"');
+    expect(markup).toContain('aria-label="Image attachment"');
+    expect(markup).toContain('aria-label="Attach image"');
   });
 
   it("renders safely when localStorage is unavailable", () => {

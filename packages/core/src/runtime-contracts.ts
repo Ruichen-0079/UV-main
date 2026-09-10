@@ -157,6 +157,8 @@ export type RuntimeVisualEvidence = Readonly<{
 
 export type RuntimeCharacterTurnInput = Readonly<{
   contextWindow?: number | undefined;
+  /** Pre-resolved evidence from one explicit user image attachment. */
+  visualEvidence?: RuntimeVisualEvidence | undefined;
   requestVisualEvidence?:
     | ((request: Readonly<{ need: string }>) => Promise<RuntimeVisualEvidence>)
     | undefined;
@@ -319,11 +321,19 @@ export type HandleUserMessageInput = {
   voiceProfileId?: string | null | undefined;
 };
 
+export type RuntimeImageAttachment = Readonly<{
+  imageBase64: string;
+  mimeType: "image/png" | "image/jpeg";
+}>;
+
 export type HandleUserMessageOptions = {
   voiceOutput?: boolean | undefined;
   useMemory?: boolean | undefined;
   readMemory?: boolean | undefined;
   writeMemory?: boolean | undefined;
+  /** One explicit user-provided image for the same reactive turn. Never persisted as bytes. */
+  imageAttachment?: RuntimeImageAttachment | undefined;
+  signal?: AbortSignal | undefined;
   /**
    * Semantic controller boundary for durable proactive policy. This is not a
    * person identity and must not be inferred from speakerId.

@@ -3,7 +3,9 @@ import { apiClient } from "./api/client.js";
 import {
   extractVisionRawBase64,
   normalizeVisionImageMimeType,
-  toVisionFileInput
+  readVisionImageAttachment,
+  toVisionFileInput,
+  VISION_IMAGE_MAX_BYTES
 } from "./vision-input.js";
 
 afterEach(() => {
@@ -38,6 +40,49 @@ describe("Vision web input contract", () => {
     expect(() => toVisionFileInput("data:image/webp;base64,AQID", "image/webp")).toThrow(
       "Only PNG and JPEG image files are supported."
     );
+  });
+
+  it("reads one bounded PNG/JPEG file into request bytes and an in-memory preview", async () => {
+    class FakeFileReader {
+      result: string | ArrayBuffer | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      readAsDataURL() {
+        this.result = "data:image/png;base64,AQID";
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("FileReader", FakeFileReader);
+
+    const attachment = await readVisionImageAttachment({
+      name: "screen.png",
+      type: "image/png",
+      size: 3
+    } as File);
+
+    expect(attachment).toEqual({
+      name: "screen.png",
+      size: 3,
+      dataUrl: "data:image/png;base64,AQID",
+      imageBase64: "AQID",
+      mimeType: "image/png"
+    });
+  });
+
+  it("rejects unsupported, empty, and oversized files before reading bytes", async () => {
+    await expect(
+      readVisionImageAttachment({ name: "clip.webp", type: "image/webp", size: 3 } as File)
+    ).rejects.toThrow("Only PNG and JPEG");
+    await expect(
+      readVisionImageAttachment({ name: "empty.png", type: "image/png", size: 0 } as File)
+    ).rejects.toThrow("empty");
+    await expect(
+      readVisionImageAttachment({
+        name: "huge.jpg",
+        type: "image/jpeg",
+        size: VISION_IMAGE_MAX_BYTES + 1
+      } as File)
+    ).rejects.toThrow("20 MiB");
   });
 
   it("passes the exact AbortSignal to fetch without serializing it", async () => {

@@ -347,3 +347,163 @@ it("keeps non-streaming grounded turns out of automatic Memory too", async () =>
   expect(reply?.payload.content).toBe("YUVI original-turn answer");
   expect(s.extractCandidates).not.toHaveBeenCalled();
 });
+
+
+describe("explicit user image attachment grounding", () => {
+  async function collectAttached(
+    runtime: RuntimeOrchestrator,
+    options: { signal?: AbortSignal; imageBase64?: string } = {}
+  ) {
+    const events: RuntimeReplyStreamEvent[] = [];
+    for await (const event of runtime.streamUserMessage(
+      { sessionId: "attached", content: "What is shown in this image?" },
+      {
+        writeMemory: true,
+        imageAttachment: {
+          imageBase64: options.imageBase64 ?? "AQID",
+          mimeType: "image/png"
+        },
+        ...(options.signal ? { signal: options.signal } : {})
+      }
+    )) {
+      events.push(event);
+    }
+    return events;
+  }
+
+  it("uses routed Vision once and hands bounded evidence to the same Character turn", async () => {
+    let attachedEvidence: unknown;
+    const s = setup(async (input) => {
+      attachedEvidence = input.visualEvidence;
+      return respond();
+    });
+    s.analyzeImage.mockImplementationOnce(async () => {
+      expect(s.published.some((event) => event.type === "user.message")).toBe(true);
+      return { text: "VISIBLE_ERROR " + "x".repeat(5000) };
+    });
+
+    const events = await collectAttached(s.runtime);
+
+    expect(s.captureScreen).not.toHaveBeenCalled();
+    expect(s.analyzeImage).toHaveBeenCalledTimes(1);
+    const visionCall = s.analyzeImage.mock.calls[0] as unknown as [
+      { imageBase64: string; mimeType: string; prompt: string },
+      { allowFallback?: boolean; signal?: AbortSignal }
+    ];
+    expect(visionCall[0]).toMatchObject({
+      imageBase64: "AQID",
+      mimeType: "image/png",
+      prompt: expect.stringContaining("What is shown in this image?")
+    });
+    expect(visionCall[1]).toMatchObject({ allowFallback: false });
+    expect(visionCall[1].signal).toBeInstanceOf(AbortSignal);
+    expect(attachedEvidence).toEqual({
+      status: "AVAILABLE",
+      observations: expect.stringMatching(/^VISIBLE_ERROR/)
+    });
+    expect(JSON.stringify(attachedEvidence).length).toBeLessThan(4100);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      sessionId: "attached",
+      content: "YUVI original-turn answer"
+    });
+    expect(JSON.stringify(s.published)).not.toContain("AQID");
+    expect(s.published.some((event) => event.type === "perception.vision")).toBe(false);
+    expect(s.extractCandidates).not.toHaveBeenCalled();
+  });
+
+  it("does not allow an attached-image turn to request a second screen grounding cycle", async () => {
+    const s = setup(async (input) => {
+      expect(input.visualEvidence).toBeDefined();
+      await input.requestVisualEvidence!({ need: "capture screen too" });
+      return respond();
+    });
+
+    await expect(collectAttached(s.runtime)).rejects.toThrow("Only one visual grounding cycle");
+    expect(s.captureScreen).not.toHaveBeenCalled();
+    expect(s.analyzeImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades provider failure to unavailable evidence without inventing image contents", async () => {
+    let attachedEvidence: unknown;
+    const s = setup(async (input) => {
+      attachedEvidence = input.visualEvidence;
+      return respond();
+    });
+    s.analyzeImage.mockRejectedValueOnce(new Error("private provider failure"));
+
+    await collectAttached(s.runtime);
+
+    expect(attachedEvidence).toEqual({
+      status: "UNAVAILABLE",
+      observations: "Attached image analysis failed. Image contents are unknown."
+    });
+    expect(JSON.stringify(attachedEvidence)).not.toContain("private provider failure");
+    expect(s.extractCandidates).not.toHaveBeenCalled();
+  });
+
+  it("fences an attachment result when the caller cancels during Vision", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const controller = new AbortController();
+    let characterRan = false;
+    const s = setup(async () => {
+      characterRan = true;
+      return respond();
+    });
+    s.analyzeImage.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return { text: "stale attached evidence" };
+    });
+
+    const pending = collectAttached(s.runtime, { signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    release.resolve();
+
+    await expect(pending).rejects.toMatchObject({ code: ProviderErrorCode.Cancelled });
+    expect(characterRan).toBe(false);
+    expect(s.published.some((event) => event.type === "agent.reply")).toBe(false);
+  });
+
+  it("fences old attached evidence when a newer explicit turn starts", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let characterCalls = 0;
+    const s = setup(async () => {
+      characterCalls += 1;
+      return respond();
+    });
+    s.analyzeImage.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return { text: "stale attached evidence" };
+    });
+
+    const pending = collectAttached(s.runtime);
+    await entered.promise;
+    await collect(s.runtime);
+    release.resolve();
+
+    await expect(pending).rejects.toMatchObject({ code: ProviderErrorCode.Cancelled });
+    expect(characterCalls).toBe(1);
+  });
+
+  it("rejects invalid attachment bytes before Vision and still keeps the turn epistemically honest", async () => {
+    let attachedEvidence: unknown;
+    const s = setup(async (input) => {
+      attachedEvidence = input.visualEvidence;
+      return respond();
+    });
+
+    await collectAttached(s.runtime, { imageBase64: "***not-base64***" });
+
+    expect(s.analyzeImage).not.toHaveBeenCalled();
+    expect(attachedEvidence).toMatchObject({
+      status: "UNAVAILABLE",
+      observations: expect.stringContaining("invalid")
+    });
+    expect(s.extractCandidates).not.toHaveBeenCalled();
+  });
+});

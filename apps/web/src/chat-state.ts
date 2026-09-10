@@ -14,6 +14,11 @@ export type ChatMessage = {
   readMemory?: boolean;
   writeMemory?: boolean;
   voiceOutput?: boolean;
+  /** Presentation-only attachment preview; never a persisted conversation field. */
+  imageAttachment?: {
+    name: string;
+    dataUrl: string;
+  };
   provider?: ProviderCallMetadata | string;
 };
 
