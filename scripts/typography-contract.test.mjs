@@ -62,10 +62,13 @@ test("one typography token set owns body, conversation, labels, controls, subtit
 });
 
 test("Linux Installed and Portable package report and serve bundled typography", () => {
+  const buildLinuxWeb = read("scripts/desktop-package/build-linux-web.mjs");
   const prepare = read("scripts/desktop-package/prepare-linux-daily.mjs");
   const audit = read("scripts/desktop-package/audit-linux-public-artifact.mjs");
   const server = read("scripts/desktop-package/linux-static-web-server.mjs");
 
+  assert.match(buildLinuxWeb, /prepareProductFonts/);
+  assert.match(buildLinuxWeb, /await prepareProductFonts\(\)/);
   assert.match(prepare, /offline-typography-fonts/);
   assert.match(prepare, /typographyBundled:\s*true/);
   assert.match(prepare, /typographyRuntimeNetworkFetch:\s*false/);
