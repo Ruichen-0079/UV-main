@@ -7,7 +7,7 @@ const base = process.env.YUVI_UI_URL || "http://127.0.0.1:5174";
 const api = process.env.YUVI_UI_API || "http://127.0.0.1:6122";
 assert.equal(new URL(api).hostname, "127.0.0.1");
 assert.notEqual(new URL(api).port, "6121");
-const modelDir = process.env.YUVI_HIYORI_DIRECTORY || "/tmp/campaign-h-official-hiyori";
+const modelZip = process.env.YUVI_HIYORI_ZIP || "/tmp/campaign-h-official-hiyori.zip";
 const browser = await chromium.launch({
   headless: true,
   args: ["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -40,26 +40,30 @@ try {
   const panel = page.getByRole("region", { name: "Live2D 模型" });
   await step("Chinese default and disabled empty import", async () => {
     assert.equal(await page.locator("html").getAttribute("lang"), "zh-CN");
-    assert.ok(await panel.getByRole("button", { name: "导入模型", exact: true }).isDisabled());
+    assert.ok(await panel.getByRole("button", { name: "导入 ZIP", exact: true }).isDisabled());
+    assert.equal(await panel.getByLabel("模型目录", { exact: true }).count(), 0);
+    assert.equal(await panel.getByText("模型清单", { exact: true }).count(), 0);
   });
-  await step("Official Hiyori directory import, pending feedback and installed copy", async () => {
-    await panel.getByLabel("模型目录", { exact: true }).setInputFiles(modelDir);
-    await panel.getByLabel("模型名称", { exact: true }).fill("Hiyori Momose · H acceptance");
+  await step("Official Hiyori ZIP import, pending feedback, activation and installed copy", async () => {
+    await panel.getByLabel("Live2D ZIP", { exact: true }).setInputFiles(modelZip);
+    await panel.getByLabel("模型名称（可选）", { exact: true }).fill("Hiyori Momose · H acceptance");
     let release;
     let arrived;
-    const waiting = new Promise((r) => (arrived = r));
-    await page.route("**/api/live2d/models/import", async (route) => {
+    const waiting = new Promise((resolve) => (arrived = resolve));
+    await page.route("**/api/live2d/models/import-zip", async (route) => {
       arrived();
-      await new Promise((r) => (release = r));
+      await new Promise((resolve) => (release = resolve));
       await route.continue();
     });
     const response = page.waitForResponse(
-      (r) => r.url().endsWith("/live2d/models/import") && r.request().method() === "POST"
+      (candidate) =>
+        candidate.url().endsWith("/live2d/models/import-zip") &&
+        candidate.request().method() === "POST"
     );
-    await panel.getByRole("button", { name: "导入模型", exact: true }).click();
+    await panel.getByRole("button", { name: "导入 ZIP", exact: true }).click();
     try {
       await waiting;
-      assert.ok(await panel.getByRole("button", { name: "导入模型", exact: true }).isDisabled());
+      assert.ok(await panel.getByRole("button", { name: "导入 ZIP", exact: true }).isDisabled());
       assert.equal(
         await panel.getByRole("progressbar", { name: "模型操作进度" }).getAttribute("value"),
         null
@@ -69,21 +73,21 @@ try {
     }
     const result = await response;
     assert.equal(result.status(), 200);
-    imported.push((await result.json()).id);
-    await page.unroute("**/api/live2d/models/import");
-    await panel.getByRole("status").filter({ hasText: "模型已安装" }).waitFor();
+    const importedState = await result.json();
+    assert.ok(importedState.activeId);
+    imported.push(importedState.activeId);
+    await page.unroute("**/api/live2d/models/import-zip");
+    await panel.getByRole("status").filter({ hasText: "模型 ZIP 已安装并选中" }).waitFor();
     const installed = (await (await fetch(api + "/live2d/models")).json()).models.find(
-      (m) => m.id === imported[0]
+      (model) => model.id === imported[0]
     );
     assert.ok(installed);
     assert.equal(installed.source, "user");
+    assert.equal((await (await fetch(api + "/live2d/models")).json()).activeId, imported[0]);
     assert.equal((await fetch(api + installed.url.slice(4))).status, 200);
   });
-  await step("Hiyori selection persists on reload and existing Cubism renderer loads", async () => {
+  await step("ZIP activation persists on reload and existing Cubism renderer loads", async () => {
     assert.ok(imported[0]);
-    const row = panel.locator("li").filter({ hasText: "Hiyori Momose · H acceptance" });
-    await row.getByRole("button", { name: "选择模型", exact: true }).click();
-    await row.getByText("已选择", { exact: true }).waitFor();
     assert.equal((await (await fetch(api + "/live2d/models")).json()).activeId, imported[0]);
     await page.reload();
     await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -124,25 +128,21 @@ try {
     assert.equal((await (await fetch(api + "/live2d/models")).json()).activeId, null);
     assert.ok(!await panel.locator("li").filter({ hasText: "Hiyori Momose · H acceptance" }).getByRole("button", { name: "移除模型", exact: true }).isDisabled());
   });
-  await step("Invalid package rejects without fake success or registration", async () => {
-    const fixture = "/tmp/campaign-h-invalid-model";
-    await fs.mkdir(fixture, { recursive: true });
-    await fs.writeFile(
-      fixture + "/broken.model3.json",
-      JSON.stringify({
-        Version: 3,
-        FileReferences: { Moc: "missing.moc3", Textures: ["missing.png"] }
-      })
-    );
+  await step("Malformed ZIP rejects without fake success and remains retryable", async () => {
+    const fixture = "/tmp/campaign-h-invalid-model.zip";
+    await fs.writeFile(fixture, "not a zip archive");
     const before = (await (await fetch(api + "/live2d/models")).json()).models.length;
-    await panel.getByLabel("模型目录", { exact: true }).setInputFiles(fixture);
+    await panel.getByLabel("Live2D ZIP", { exact: true }).setInputFiles(fixture);
     const response = page.waitForResponse(
-      (r) => r.url().endsWith("/live2d/models/import") && r.request().method() === "POST"
+      (candidate) =>
+        candidate.url().endsWith("/live2d/models/import-zip") &&
+        candidate.request().method() === "POST"
     );
-    await panel.getByRole("button", { name: "导入模型", exact: true }).click();
+    await panel.getByRole("button", { name: "导入 ZIP", exact: true }).click();
     assert.equal((await response).status(), 400);
     await panel.getByRole("alert").waitFor();
     assert.equal((await (await fetch(api + "/live2d/models")).json()).models.length, before);
+    assert.ok(await panel.getByRole("button", { name: "重试导入", exact: true }).isEnabled());
   });
   await step("Language selection persists through full page reload", async () => {
     await page.getByRole("combobox", { name: "界面语言", exact: true }).selectOption("en");
@@ -171,7 +171,7 @@ try {
     assert.ok(
       !(await (await fetch(api + "/live2d/models")).json()).models.some((m) => m.id === imported[0])
     );
-    assert.ok((await fs.stat(modelDir + "/Hiyori.model3.json")).isFile());
+    assert.ok((await fs.stat(modelZip)).isFile());
     imported.length = 0;
   });
 } finally {

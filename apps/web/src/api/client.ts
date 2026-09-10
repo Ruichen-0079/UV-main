@@ -994,9 +994,6 @@ export type Live2DModel = { id: string; name: string; model: string; source: "us
 export type Live2DModelState = { models: Live2DModel[]; activeId: string | null; activeUrl: string | null; intendedDefault: string };
 export const apiClient = {
   getLive2DModels(signal?: AbortSignal): Promise<Live2DModelState> { return request("/live2d/models", signalRequestInit(signal)); },
-  importLive2DModel(input: { name: string; model: string; files: { path: string; base64: string }[] }): Promise<Live2DModel> {
-    return request("/live2d/models/import", { method: "POST", body: JSON.stringify(input) });
-  },
   importLive2DZip(input: { name: string; archiveBase64: string }): Promise<Live2DModelState> {
     return request("/live2d/models/import-zip", { method: "POST", body: JSON.stringify(input) });
   },
