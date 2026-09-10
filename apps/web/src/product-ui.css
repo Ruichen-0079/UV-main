@@ -1710,6 +1710,17 @@ html[data-yuvi-surface="main"] #root {
   padding: 2px 4px;
 }
 
+.yuvi-main-message-image {
+  display: block;
+  width: min(280px, 100%);
+  max-height: 280px;
+  object-fit: contain;
+  margin: 0 0 9px auto;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--yuvi-main-line) 55%, transparent);
+}
+
+
 .yuvi-main-message .assistant-markdown {
   color: inherit;
   font-size: 0.95rem;
@@ -1786,9 +1797,78 @@ html[data-yuvi-surface="main"] #root {
   line-height: 1.45;
 }
 
+.yuvi-main-attachment-preview {
+  display: flex;
+  width: fit-content;
+  max-width: min(360px, 100%);
+  align-items: center;
+  gap: 10px;
+  margin: 0 8px 9px;
+  border: 1px solid var(--yuvi-main-line);
+  border-radius: 15px;
+  background: var(--yuvi-main-surface);
+  padding: 6px 8px 6px 6px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--yuvi-main-ink) 5%, transparent);
+}
+
+.yuvi-main-attachment-preview > img {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--yuvi-main-bg);
+}
+
+.yuvi-main-attachment-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.yuvi-main-attachment-copy span {
+  overflow: hidden;
+  color: var(--yuvi-main-ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yuvi-main-attachment-copy small {
+  color: var(--yuvi-main-muted);
+  font-size: 0.7rem;
+}
+
+.yuvi-main-attachment-remove {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--yuvi-main-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.yuvi-main-attachment-remove:hover {
+  background: var(--yuvi-main-accent-soft);
+  color: var(--yuvi-main-ink);
+}
+
+.yuvi-main-file-input {
+  display: none;
+}
+
+
 .yuvi-main-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  grid-template-columns: 38px minmax(0, 1fr) 38px 38px;
   align-items: end;
   gap: 6px;
   min-height: 58px;
@@ -1859,6 +1939,7 @@ html[data-yuvi-surface="main"] #root {
   outline-offset: 2px;
 }
 
+.yuvi-main-attach:hover:not(:disabled),
 .yuvi-main-microphone:hover:not(:disabled) {
   background: var(--yuvi-main-accent-soft);
   color: var(--yuvi-main-accent);
@@ -1918,7 +1999,7 @@ html[data-yuvi-surface="main"] #root {
   }
 
   .yuvi-main-composer {
-    grid-template-columns: minmax(0, 1fr) 36px 36px;
+    grid-template-columns: 36px minmax(0, 1fr) 36px 36px;
     min-height: 54px;
     border-radius: 21px;
     padding: 7px 7px 7px 13px;

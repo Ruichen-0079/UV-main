@@ -164,6 +164,10 @@ export type SendMessageRequest = {
   speechObservationId?: string;
   sessionId: string;
   text: string;
+  imageAttachment?: {
+    imageBase64: string;
+    mimeType: "image/png" | "image/jpeg";
+  };
   options: {
     useMemory?: boolean;
     readMemory?: boolean;

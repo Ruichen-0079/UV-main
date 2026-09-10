@@ -21,6 +21,7 @@ export type {
   HandleUserMessageOptions,
   MaybeSynthesizeSpeechOptions,
   ProactiveShouldSpeak,
+  RuntimeImageAttachment,
   RuntimeLifecycleState,
   RuntimeMemoryCandidateAcceptResult,
   RuntimeMemoryCandidateDecision,

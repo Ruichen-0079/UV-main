@@ -6,7 +6,7 @@ import { registerMessageStreamRoutes } from "./message-stream.js";
 import { encodeSseFrame, writeSseFrame } from "./sse.js";
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 function runtimeFor(
   streamUserMessage: AppContext["runtime"]["streamUserMessage"]
@@ -84,6 +84,117 @@ describe("versioned message SSE route", () => {
     ]);
     expect(frames.map((frame) => frame.data["text"]).filter(Boolean).join("")).toBe("hello");
     expect(frames.at(-1)?.data).toMatchObject({ type: "completed", content: "hello" });
+    await app.close();
+  });
+
+  it("forwards one validated PNG/JPEG attachment to the same Runtime stream turn", async () => {
+    let runtimeInput: unknown;
+    let runtimeOptions: unknown;
+    const app = await createTestApp(
+      runtimeFor(async function* (input, options): AsyncIterable<RuntimeReplyStreamEvent> {
+        runtimeInput = input;
+        runtimeOptions = options;
+        yield {
+          type: "completed",
+          messageId: "assistant-image",
+          sessionId: "session-image",
+          traceId: "trace-image",
+          content: "I can see it.",
+          provider: "mock"
+        };
+      })
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages/stream",
+      payload: {
+        sessionId: "session-image",
+        content: "What is shown?",
+        imageAttachment: { imageBase64: "AQID", mimeType: "image/png" }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(runtimeInput).toMatchObject({
+      type: "user.message",
+      payload: {
+        sessionId: "session-image",
+        content: "What is shown?"
+      }
+    });
+    expect(runtimeOptions).toMatchObject({
+      imageAttachment: { imageBase64: "AQID", mimeType: "image/png" }
+    });
+    await app.close();
+  });
+
+  it.each([
+    {
+      name: "unsupported MIME",
+      imageAttachment: { imageBase64: "AQID", mimeType: "image/gif" }
+    },
+    {
+      name: "invalid base64",
+      imageAttachment: { imageBase64: "***", mimeType: "image/png" }
+    },
+    {
+      name: "empty base64",
+      imageAttachment: { imageBase64: "", mimeType: "image/jpeg" }
+    }
+  ])("rejects $name before Runtime", async ({ imageAttachment }) => {
+    const runtime = vi.fn(async function* (): AsyncIterable<RuntimeReplyStreamEvent> {
+      yield {
+        type: "completed",
+        messageId: "should-not-run",
+        sessionId: "default",
+        traceId: "should-not-run",
+        content: "",
+        provider: "mock"
+      };
+    });
+    const app = await createTestApp(runtimeFor(runtime as AppContext["runtime"]["streamUserMessage"]));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages/stream",
+      payload: { content: "inspect this", imageAttachment }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(runtime).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("accepts a valid attachment request larger than Fastify's default body limit", async () => {
+    const imageBase64 = Buffer.alloc(1_100_000, 7).toString("base64");
+    let observedLength = 0;
+    const app = await createTestApp(
+      runtimeFor(async function* (_input, options): AsyncIterable<RuntimeReplyStreamEvent> {
+        observedLength = options?.imageAttachment?.imageBase64.length ?? 0;
+        yield {
+          type: "completed",
+          messageId: "assistant-large-image",
+          sessionId: "large-image",
+          traceId: "trace-large-image",
+          content: "done",
+          provider: "mock"
+        };
+      })
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages/stream",
+      payload: {
+        sessionId: "large-image",
+        content: "inspect",
+        imageAttachment: { imageBase64, mimeType: "image/jpeg" }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(observedLength).toBe(imageBase64.length);
     await app.close();
   });
 

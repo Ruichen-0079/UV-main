@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../context.js";
 import {
   MessageRequestSchema,
+  MESSAGE_REQUEST_BODY_LIMIT,
   normalizeMessageMemoryOptions,
   resolveMessageIdentity,
   sendMessageError
@@ -23,7 +24,10 @@ export async function registerMessageStreamRoutes(
   app: FastifyInstance,
   context: AppContext
 ): Promise<void> {
-  app.post("/v1/messages/stream", async (request, reply) => {
+  app.post(
+    "/v1/messages/stream",
+    { bodyLimit: MESSAGE_REQUEST_BODY_LIMIT },
+    async (request, reply) => {
     const input = MessageRequestSchema.safeParse(request.body);
     if (!input.success) {
       return reply.status(400).send({ error: "invalid_request", details: input.error.flatten() });
@@ -59,6 +63,7 @@ export async function registerMessageStreamRoutes(
       useMemory: memoryOptions.legacyUseMemory,
       readMemory: memoryOptions.readMemory,
       writeMemory: memoryOptions.writeMemory,
+      ...(input.data.imageAttachment ? { imageAttachment: input.data.imageAttachment } : {}),
       controlAuthority: "LOCAL_EXPLICIT_CONTROLLER"
     });
     const iterator = runtimeStream[Symbol.asyncIterator]();
