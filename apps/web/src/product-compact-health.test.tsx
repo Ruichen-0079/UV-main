@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe("Product compact multi-capability health", () => {
-  it("renders YUVI, Memory, Voice, and Lumi as compact product groups", () => {
+  it("keeps Runtime health focused on YUVI, Memory, and Voice", () => {
     const markup = renderToStaticMarkup(
       <ProductCompactHealth health={health()} loading={false} error={null} />
     );
@@ -59,7 +59,7 @@ describe("Product compact multi-capability health", () => {
     expect(markup).toContain("YUVI");
     expect(markup).toContain("Memory");
     expect(markup).toContain("Voice");
-    expect(markup).toContain("Lumi");
+    expect(markup).not.toContain("Lumi");
     expect(markup).toContain("Daily health");
   });
 
@@ -105,11 +105,10 @@ describe("Product compact multi-capability health", () => {
     });
     const items = productCompactHealthItems({ health: observed, loading: false, error: null });
     const voice = items.find((item) => item.id === "voice");
-    const lumi = items.find((item) => item.id === "lumi");
 
     expect(voice?.detail).toContain("available (cached live observation)");
     expect(voice?.detail).toContain("unknown (no cached live observation)");
-    expect(lumi).toMatchObject({ summary: "Unknown", tone: "idle" });
+    expect(items.map((item) => item.id)).toEqual(["yuvi", "memory", "voice"]);
   });
 
   it("does not render provider errors or secrets and performs no verification on render", () => {

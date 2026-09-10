@@ -91,7 +91,7 @@ vi.mock("./lumi-canvas.js", async () => {
       getFramingDiagnostics: () => null,
       getDebugInfo: () => ({ instanceId: 0, generation: 0 })
     }));
-    return react.createElement("div", { "aria-label": "Lumi avatar" }, "Lumi avatar");
+    return react.createElement("div", { "aria-label": "Companion avatar" }, "Companion avatar");
   });
   return { LumiCanvas };
 });
@@ -417,7 +417,7 @@ describe("CompanionPage product overlay", () => {
   it("renders as an avatar-only surface without visible product chrome in a plain browser", () => {
     expect(() => renderToStaticMarkup(<CompanionPage />)).not.toThrow();
     const markup = renderToStaticMarkup(<CompanionPage />);
-    expect(markup).toContain("Lumi avatar");
+    expect(markup).toContain("Companion avatar");
     expect(markup).not.toContain("data-tauri-drag-region");
     expect(markup).not.toContain("Resize window");
     expect(markup).not.toContain("Full body");

@@ -20,6 +20,7 @@ import type {
   EmbodiedPresentationRequest
 } from "@companion/protocol";
 import { resolveRuntimeAssetUrl } from "./desktop-runtime.js";
+import type { Live2DModelSelectionProjection } from "./companion-presentation-projection.js";
 
 
 
@@ -35,6 +36,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     className?: string;
     onPresentationOutcome?: (report: EmbodiedPresentationOutcomeReport) => void;
     onModelLifecycle?: (state: LumiModelLifecycle) => void;
+    onModelSelection?: (selection: Live2DModelSelectionProjection) => void;
     /** Hide all non-canvas chrome for the transparent desktop companion surface. */
     presentationOnly?: boolean;
     showFramingToggle?: boolean;
@@ -43,6 +45,12 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
 ): JSX.Element {
   const [modelSource, setModelSource] = useState<string | null>(null);
   const [modelError, setModelError] = useState("");
+  const modelSourceRef = useRef<string | null>(null);
+  const onModelLifecycleRef = useRef(props.onModelLifecycle);
+  onModelLifecycleRef.current = props.onModelLifecycle;
+  const onModelSelectionRef = useRef(props.onModelSelection);
+  onModelSelectionRef.current = props.onModelSelection;
+
   useEffect(() => {
     let disposed = false;
     const abort = new AbortController();
@@ -51,15 +59,54 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
       try {
         const result = await apiClient.getLive2DModels(abort.signal);
         if (!disposed) {
-          setModelSource(result.activeUrl);
-          if (!result.activeUrl) { setModelLifecycle("failed"); onModelLifecycleRef.current?.("failed"); }
-          setModelError(result.activeUrl ? "" : "No active Live2D model. Open Settings to install Hiyori or select a model.");
+          if (result.activeId === null) {
+            onModelSelectionRef.current?.({ kind: "none" });
+            modelSourceRef.current = null;
+            setModelSource(null);
+            setModelLifecycle("failed");
+            onModelLifecycleRef.current?.("failed");
+            setModelError("No active Live2D model. Open Settings to install Hiyori or select a model.");
+          } else if (!result.activeUrl) {
+            onModelSelectionRef.current?.({ kind: "unavailable" });
+            setModelLifecycle("failed");
+            onModelLifecycleRef.current?.("failed");
+            setModelError("Unable to read the selected Live2D model.");
+          } else {
+            const activeModel = result.models.find((model) => model.id === result.activeId);
+            onModelSelectionRef.current?.({
+              kind: "selected",
+              id: result.activeId,
+              name: activeModel?.name ?? result.activeId
+            });
+            if (modelSourceRef.current !== result.activeUrl) {
+              modelSourceRef.current = result.activeUrl;
+              setModelLifecycle("loading");
+              onModelLifecycleRef.current?.("loading");
+            }
+            setModelSource(result.activeUrl);
+            setModelError("");
+          }
         }
-      } catch { if (!disposed) setModelError("Unable to read the selected Live2D model."); }
-      finally { if (!disposed) timer = setTimeout(() => void refresh(), 3000); }
+      } catch {
+        if (!disposed) {
+          // A transient model-list read failure must not downgrade a renderer
+          // that is already presenting a loaded model. On first load there is
+          // no renderer truth to preserve, so report the bounded failure.
+          if (modelSourceRef.current === null) {
+            onModelSelectionRef.current?.({ kind: "unavailable" });
+          }
+          setModelError("Unable to read the selected Live2D model.");
+        }
+      } finally {
+        if (!disposed) timer = setTimeout(() => void refresh(), 3000);
+      }
     };
     void refresh();
-    return () => { disposed = true; abort.abort(); clearTimeout(timer); };
+    return () => {
+      disposed = true;
+      abort.abort();
+      clearTimeout(timer);
+    };
   }, []);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -70,8 +117,6 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
   projectionRef.current = props.requestedProjection;
   const onPresentationOutcomeRef = useRef(props.onPresentationOutcome);
   onPresentationOutcomeRef.current = props.onPresentationOutcome;
-  const onModelLifecycleRef = useRef(props.onModelLifecycle);
-  onModelLifecycleRef.current = props.onModelLifecycle;
   // Default portrait (half). Full-body only after an explicit user toggle.
   const [framing, setFraming] = useState<LumiFraming>("half");
   const [overlay, setOverlay] = useState<LumiFramingDiagnostics | null>(null);
@@ -194,7 +239,7 @@ export const LumiCanvas = forwardRef(function LumiCanvas(
     <div
       ref={containerRef}
       className={props.className ?? "relative min-h-[280px] overflow-hidden rounded-md bg-ink-900"}
-      aria-label={t("Lumi avatar")}
+      aria-label={t("Companion avatar")}
       data-presence={state}
       data-model-lifecycle={modelLifecycle}
       data-framing={framing}

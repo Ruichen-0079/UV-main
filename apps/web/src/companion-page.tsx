@@ -8,6 +8,11 @@ import {
   type CompanionTtsConfiguration
 } from "./companion-bus.js";
 import {
+  CompanionPresentationProjectionChannel,
+  deriveCompanionRendererPresentation,
+  type Live2DModelSelectionProjection
+} from "./companion-presentation-projection.js";
+import {
   applyCapabilityProjection,
   deriveCapabilityProjection,
   detectBrowserAudioCapability
@@ -81,6 +86,11 @@ export function CompanionPage(): JSX.Element {
   const ttsConfigRef = useRef(ttsConfig);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
   const [modelLifecycle, setModelLifecycle] = useState<LumiModelLifecycle>("loading");
+  const [modelSelection, setModelSelection] = useState<Live2DModelSelectionProjection | null>(null);
+  const rendererPresentation = useMemo(
+    () => deriveCompanionRendererPresentation(modelSelection, modelLifecycle),
+    [modelLifecycle, modelSelection]
+  );
   const audioCapability = useMemo(() => detectBrowserAudioCapability(), []);
   const presenceProjectionRef = useRef<CompanionPresenceProjection | null>(null);
   const activeEpochRef = useRef<string | null>(null);
@@ -94,9 +104,12 @@ export function CompanionPage(): JSX.Element {
   );
   const behaviorControllerRef = useRef<BehaviorPolicyController | null>(null);
   const companionBusRef = useRef<CompanionBus | null>(null);
+  const presentationChannelRef = useRef<CompanionPresentationProjectionChannel | null>(null);
+  const rendererPresentationRef = useRef(rendererPresentation);
   const behaviorSessionIdRef = useRef("companion-page-session");
   presenceProjectionRef.current = presence;
   ttsConfigRef.current = ttsConfig;
+  rendererPresentationRef.current = rendererPresentation;
 
   const capabilityProjection = useMemo(
     () =>
@@ -163,6 +176,24 @@ export function CompanionPage(): JSX.Element {
     if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
     return subscribeServiceStatusState(setServiceStatus);
   }, []);
+
+  useEffect(() => {
+    const channel = new CompanionPresentationProjectionChannel();
+    presentationChannelRef.current = channel;
+    const unsubscribeRequests = channel.subscribeRequests(() => {
+      channel.postState(rendererPresentationRef.current);
+    });
+    channel.postState(rendererPresentationRef.current);
+    return () => {
+      unsubscribeRequests();
+      if (presentationChannelRef.current === channel) presentationChannelRef.current = null;
+      channel.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    presentationChannelRef.current?.postState(rendererPresentation);
+  }, [rendererPresentation]);
 
   useEffect(() => {
     updatePresence((current) =>
@@ -596,6 +627,7 @@ export function CompanionPage(): JSX.Element {
         ref={lumiRef}
         requestedProjection={presence}
         onModelLifecycle={setModelLifecycle}
+        onModelSelection={setModelSelection}
         onPresentationOutcome={submitPresentationOutcome}
         className="h-full w-full rounded-none"
         presentationOnly

@@ -158,6 +158,13 @@ fn reopen_companion(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_companion_presentation_state(
+  app: tauri::AppHandle,
+) -> Result<desktop_surface::CompanionPresentationState, String> {
+  DesktopSurfaceManager::companion_presentation_state(&app)
+}
+
+#[tauri::command]
 fn show_webui(app: tauri::AppHandle) -> Result<(), String> {
   DesktopSurfaceManager::execute(&app, SurfaceId::WebUI, SurfaceCommand::Show)
 }
@@ -265,6 +272,7 @@ pub fn run() {
       hide_companion,
       toggle_companion,
       reopen_companion,
+      get_companion_presentation_state,
       show_webui,
       show_subtitle,
       hide_subtitle,

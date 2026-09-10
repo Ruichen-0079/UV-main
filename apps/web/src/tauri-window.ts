@@ -49,6 +49,16 @@ export async function controlCompanionWindow(action: CompanionWindowAction): Pro
   await invoke(action);
 }
 
+export type CompanionPresentationState = {
+  visible: boolean;
+};
+
+export async function getCompanionPresentationState(): Promise<CompanionPresentationState> {
+  if (!isTauriRuntime()) return { visible: false };
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<CompanionPresentationState>("get_companion_presentation_state");
+}
+
 
 /** Show the existing lazy WebUI desktop surface. Settings live there, not in Main Chat. */
 export async function controlWebUIWindow(): Promise<void> {

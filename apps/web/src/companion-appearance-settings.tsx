@@ -1,22 +1,49 @@
 import { useEffect, useState } from "react";
 import { t } from "./locale.js";
-import { isTauriRuntime } from "./tauri-window.js";
+import {
+  controlCompanionWindow,
+  getCompanionPresentationState,
+  isTauriRuntime,
+  type CompanionPresentationState
+} from "./tauri-window.js";
 import { fetchUserSettings, saveUserSettings } from "./user-settings-client.js";
+import {
+  CompanionPresentationProjectionChannel,
+  type CompanionRendererPresentation,
+  type Live2DRendererStatus
+} from "./companion-presentation-projection.js";
 
 export function companionAlwaysOnTopPatch(alwaysOnTop: boolean): Record<string, unknown> {
   return { companion: { alwaysOnTop } };
 }
 
+function rendererStatusLabel(status: Live2DRendererStatus): string {
+  switch (status) {
+    case "no_model":
+      return "no model";
+    case "loading":
+      return "loading";
+    case "ready":
+      return "ready";
+    case "failed":
+      return "failed";
+  }
+}
+
 /**
- * Thin Appearance projection over the existing Tauri ConfigService.
- * It owns no settings store and writes only the existing Companion presentation field.
+ * Thin Appearance projection over the existing desktop and renderer authorities.
+ * Window visibility is read from DesktopSurfaceManager; Live2D readiness is only
+ * reported by the live Companion renderer lifecycle.
  */
 export function CompanionAppearanceSettings(): JSX.Element | null {
   const tauri = isTauriRuntime();
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
   const [loading, setLoading] = useState(tauri);
   const [saving, setSaving] = useState(false);
+  const [windowBusy, setWindowBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [surface, setSurface] = useState<CompanionPresentationState>({ visible: false });
+  const [renderer, setRenderer] = useState<CompanionRendererPresentation | null>(null);
 
   useEffect(() => {
     if (!tauri) return;
@@ -42,6 +69,43 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
     };
   }, [tauri]);
 
+  useEffect(() => {
+    if (!tauri) return;
+    let cancelled = false;
+    const refreshSurface = async (): Promise<void> => {
+      try {
+        const next = await getCompanionPresentationState();
+        if (!cancelled) setSurface(next);
+      } catch (error) {
+        if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const channel = new CompanionPresentationProjectionChannel();
+    const unsubscribe = channel.subscribeState((next) => {
+      if (!cancelled) setRenderer(next);
+    });
+    channel.requestState();
+    void refreshSurface();
+
+    const poll = window.setInterval(() => void refreshSurface(), 1000);
+    const rendererDeadline = window.setTimeout(() => {
+      if (!cancelled) {
+        setRenderer((current) =>
+          current ?? { status: "failed", activeModelId: null, activeModelName: null }
+        );
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+      window.clearTimeout(rendererDeadline);
+      unsubscribe();
+      channel.close();
+    };
+  }, [tauri]);
+
   if (!tauri) return null;
 
   const save = async (): Promise<void> => {
@@ -58,6 +122,24 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
     }
   };
 
+  const controlWindow = async (action: "show_companion" | "hide_companion"): Promise<void> => {
+    setWindowBusy(true);
+    setNotice("");
+    try {
+      await controlCompanionWindow(action);
+      setSurface(await getCompanionPresentationState());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWindowBusy(false);
+    }
+  };
+
+  const modelLabel =
+    renderer?.activeModelName ??
+    (renderer?.status === "no_model" ? t("No model selected") : t("Unknown"));
+  const rendererLabel = t(rendererStatusLabel(renderer?.status ?? "loading"));
+
   return (
     <section className="yuvi-card grid gap-3" aria-label={t("Companion window")}>
       <div>
@@ -66,6 +148,34 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
           {t("The transparent Live2D window remembers its position and size automatically.")}
         </p>
       </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="button-primary text-xs"
+          disabled={windowBusy}
+          onClick={() => void controlWindow("show_companion")}
+        >
+          {t("Show Companion")}
+        </button>
+        <button
+          type="button"
+          className="button-secondary text-xs"
+          disabled={windowBusy}
+          onClick={() => void controlWindow("hide_companion")}
+        >
+          {t("Hide Companion")}
+        </button>
+      </div>
+
+      <div className="grid gap-1 text-xs text-[var(--yuvi-muted)]" role="status">
+        <span>
+          {t("Companion status: {0}", surface.visible ? t("visible") : t("hidden"))}
+        </span>
+        <span>{t("Current model: {0}", modelLabel)}</span>
+        <span>{t("Live2D renderer: {0}", rendererLabel)}</span>
+      </div>
+
       <label className="setting-checkbox">
         <input
           type="checkbox"
@@ -84,7 +194,11 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
         >
           {saving ? t("Saving…") : t("Save window setting")}
         </button>
-        {notice ? <span className="text-xs text-[var(--yuvi-muted)]" role="status">{notice}</span> : null}
+        {notice ? (
+          <span className="text-xs text-[var(--yuvi-muted)]" role="status">
+            {notice}
+          </span>
+        ) : null}
       </div>
     </section>
   );

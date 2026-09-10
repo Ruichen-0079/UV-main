@@ -18,6 +18,7 @@ import {
   startWindowDragging,
   startWindowResizeDragging,
   controlCompanionWindow,
+  getCompanionPresentationState,
   controlSubtitleWindow,
   controlWebUIWindow,
   getSubtitlePresentationState,
@@ -35,13 +36,20 @@ afterEach(() => {
 describe("controlCompanionWindow", () => {
   it("does not touch Tauri IPC in a browser", async () => {
     await expect(controlCompanionWindow("show_companion")).resolves.toBeUndefined();
+    await expect(getCompanionPresentationState()).resolves.toEqual({ visible: false });
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("invokes the requested command inside Tauri", async () => {
+  it("invokes controls and reads visibility from DesktopSurfaceManager inside Tauri", async () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_companion_presentation_state") return { visible: true };
+      return undefined;
+    });
     await controlCompanionWindow("reopen_companion");
     expect(invoke).toHaveBeenCalledWith("reopen_companion");
+    await expect(getCompanionPresentationState()).resolves.toEqual({ visible: true });
+    expect(invoke).toHaveBeenCalledWith("get_companion_presentation_state");
   });
 });
 

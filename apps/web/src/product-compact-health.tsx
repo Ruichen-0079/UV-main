@@ -2,7 +2,7 @@ import { t } from "./locale.js";
 import type { HealthResponse, ProviderHealth } from "./api/client.js";
 import { providerObservationLabel, providerReadinessLabel } from "./provider-diagnostics.js";
 
-export type ProductCompactHealthId = "yuvi" | "memory" | "voice" | "lumi";
+export type ProductCompactHealthId = "yuvi" | "memory" | "voice";
 export type ProductCompactHealthTone = "ok" | "warn" | "bad" | "idle";
 
 export type ProductCompactHealthItem = {
@@ -22,7 +22,7 @@ export type ProductCompactHealthProps = {
 };
 
 /**
- * Build the four daily-use status cards from current-main's existing health
+ * Build the daily-use Runtime status cards from current-main's existing health
  * projection. This function deliberately does not inspect provider `status`
  * for Voice: that legacy aggregate can say healthy while `observed` is still
  * unknown, which is not evidence that voice works.
@@ -36,8 +36,7 @@ export function productCompactHealthItems(input: {
   return [
     runtimeHealthItem(input, source),
     memoryHealthItem(input, source),
-    voiceHealthItem(input, source),
-    lumiHealthItem()
+    voiceHealthItem(input, source)
   ];
 }
 
@@ -285,15 +284,4 @@ function voiceHealthItem(
 
 function providerAxes(provider: ProviderHealth): string {
   return `${providerReadinessLabel(provider.readiness)} · ${providerObservationLabel(provider.observed)}`;
-}
-
-function lumiHealthItem(): ProductCompactHealthItem {
-  return {
-    id: "lumi",
-    label: "Lumi",
-    tone: "idle",
-    summary: "Unknown",
-    detail: "Lumi renderer readiness is unknown right now.",
-    source: "Renderer readiness is not exposed by current Runtime/Desktop APIs"
-  };
 }
