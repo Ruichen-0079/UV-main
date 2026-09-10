@@ -1565,3 +1565,388 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .settings-card {
 .yuvi-page-body > .yuvi-card > .yuvi-product-action {
   justify-self: start;
 }
+
+
+/* Main Chat: conversation is the product; operational configuration lives in WebUI. */
+html[data-yuvi-surface="main"] {
+  --yuvi-main-bg: #f7f9f7;
+  --yuvi-main-surface: #ffffff;
+  --yuvi-main-ink: #24322d;
+  --yuvi-main-muted: #718079;
+  --yuvi-main-line: #dce4df;
+  --yuvi-main-accent: #356951;
+  --yuvi-main-accent-soft: #e6efe9;
+  --yuvi-main-danger: #a33f3a;
+  color-scheme: light;
+}
+
+html[data-yuvi-theme="dark"][data-yuvi-surface="main"] {
+  --yuvi-main-bg: #17201c;
+  --yuvi-main-surface: #202b26;
+  --yuvi-main-ink: #e9f0eb;
+  --yuvi-main-muted: #a6b5ad;
+  --yuvi-main-line: #39473f;
+  --yuvi-main-accent: #94cbaa;
+  --yuvi-main-accent-soft: #2d4437;
+  --yuvi-main-danger: #e08b86;
+  color-scheme: dark;
+}
+
+html[data-yuvi-surface="main"],
+html[data-yuvi-surface="main"] body,
+html[data-yuvi-surface="main"] #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--yuvi-main-bg);
+  color: var(--yuvi-main-ink);
+}
+
+.yuvi-main-chat {
+  width: 100%;
+  height: 100vh;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--yuvi-main-bg) 95%, white) 0%, var(--yuvi-main-bg) 28%),
+    var(--yuvi-main-bg);
+  color: var(--yuvi-main-ink);
+}
+
+.yuvi-main-chat-shell {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.yuvi-main-thread {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 28px 18px 14px;
+}
+
+.yuvi-main-thread-inner {
+  display: flex;
+  width: min(760px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  flex-direction: column;
+}
+
+.yuvi-main-empty {
+  display: grid;
+  flex: 1;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  min-height: 18rem;
+  padding: 32px 16px 12vh;
+  text-align: center;
+}
+
+.yuvi-main-empty-mark {
+  display: grid;
+  width: 48px;
+  height: 52px;
+  place-items: center;
+  border-radius: 16px 16px 22px 16px;
+  background: var(--yuvi-main-accent);
+  color: var(--yuvi-main-surface);
+  font-family: Georgia, serif;
+  font-size: 38px;
+  font-style: italic;
+  line-height: 1;
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--yuvi-main-accent) 16%, transparent);
+}
+
+.yuvi-main-empty p {
+  margin: 0;
+  color: var(--yuvi-main-muted);
+  font-size: 0.98rem;
+  line-height: 1.6;
+}
+
+.yuvi-main-message-list {
+  display: grid;
+  align-content: end;
+  gap: 22px;
+  padding: 10px 0 28px;
+}
+
+.yuvi-main-message {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.yuvi-main-message.is-user {
+  align-items: flex-end;
+}
+
+.yuvi-main-message.is-assistant {
+  align-items: stretch;
+}
+
+.yuvi-main-message-content {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--yuvi-main-ink);
+}
+
+.yuvi-main-message.is-user .yuvi-main-message-content {
+  max-width: min(78%, 34rem);
+  border: 1px solid color-mix(in srgb, var(--yuvi-main-accent) 12%, var(--yuvi-main-line));
+  border-radius: 20px 20px 6px 20px;
+  background: var(--yuvi-main-accent-soft);
+  padding: 10px 14px;
+}
+
+.yuvi-main-message.is-assistant .yuvi-main-message-content {
+  width: 100%;
+  padding: 2px 4px;
+}
+
+.yuvi-main-message .assistant-markdown {
+  color: inherit;
+  font-size: 0.95rem;
+  line-height: 1.72;
+}
+
+.yuvi-main-message.is-user .yuvi-main-message-content > div {
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
+.yuvi-main-message-error {
+  max-width: 38rem;
+  margin-top: 7px;
+  color: var(--yuvi-main-danger);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.yuvi-main-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 6px 0;
+}
+
+.yuvi-main-thinking span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--yuvi-main-muted);
+  animation: yuvi-main-thinking 1.1s ease-in-out infinite;
+}
+
+.yuvi-main-thinking span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.yuvi-main-thinking span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes yuvi-main-thinking {
+  0%,
+  70%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 0.9;
+    transform: translateY(-2px);
+  }
+}
+
+.yuvi-main-composer-dock {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 22px 16px 18px;
+  background:
+    linear-gradient(180deg, transparent 0%, var(--yuvi-main-bg) 28%, var(--yuvi-main-bg) 100%);
+}
+
+.yuvi-main-composer-wrap {
+  width: min(760px, 100%);
+  margin: 0 auto;
+}
+
+.yuvi-main-inline-error {
+  margin: 0 10px 8px;
+  color: var(--yuvi-main-danger);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.yuvi-main-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  align-items: end;
+  gap: 6px;
+  min-height: 58px;
+  border: 1px solid var(--yuvi-main-line);
+  border-radius: 23px;
+  background: var(--yuvi-main-surface);
+  padding: 9px 9px 9px 15px;
+  box-shadow:
+    0 10px 30px color-mix(in srgb, var(--yuvi-main-ink) 7%, transparent),
+    0 1px 2px color-mix(in srgb, var(--yuvi-main-ink) 5%, transparent);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.yuvi-main-composer:focus-within {
+  border-color: color-mix(in srgb, var(--yuvi-main-accent) 62%, var(--yuvi-main-line));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--yuvi-main-accent) 12%, transparent),
+    0 12px 32px color-mix(in srgb, var(--yuvi-main-ink) 8%, transparent);
+}
+
+.yuvi-main-composer.is-listening {
+  border-color: color-mix(in srgb, var(--yuvi-main-accent) 72%, var(--yuvi-main-line));
+}
+
+.yuvi-main-composer-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38px;
+  max-height: 156px;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 8px 2px 7px;
+  color: var(--yuvi-main-ink);
+  font: inherit;
+  font-size: 0.96rem;
+  line-height: 1.5;
+}
+
+.yuvi-main-composer-input::placeholder {
+  color: color-mix(in srgb, var(--yuvi-main-muted) 82%, transparent);
+}
+
+.yuvi-main-composer-button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  color: var(--yuvi-main-muted);
+  background: transparent;
+}
+
+.yuvi-main-composer-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.yuvi-main-composer-button:focus-visible {
+  outline: 2px solid var(--yuvi-main-accent);
+  outline-offset: 2px;
+}
+
+.yuvi-main-microphone:hover:not(:disabled) {
+  background: var(--yuvi-main-accent-soft);
+  color: var(--yuvi-main-accent);
+}
+
+.yuvi-main-microphone[aria-pressed="true"] {
+  background: var(--yuvi-main-accent-soft);
+  color: var(--yuvi-main-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--yuvi-main-accent) 18%, transparent);
+}
+
+.yuvi-main-send,
+.yuvi-main-stop {
+  background: var(--yuvi-main-accent);
+  color: var(--yuvi-main-surface);
+}
+
+.yuvi-main-send:hover:not(:disabled),
+.yuvi-main-stop:hover:not(:disabled) {
+  filter: brightness(0.93);
+}
+
+.yuvi-main-send:disabled {
+  background: color-mix(in srgb, var(--yuvi-main-line) 80%, var(--yuvi-main-surface));
+  color: var(--yuvi-main-muted);
+  opacity: 0.7;
+}
+
+.yuvi-main-composer-status {
+  min-height: 18px;
+  padding: 6px 12px 0;
+  color: var(--yuvi-main-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.yuvi-main-composer-status.is-error {
+  color: var(--yuvi-main-danger);
+}
+
+@media (max-width: 640px) {
+  .yuvi-main-thread {
+    padding: 18px 12px 8px;
+  }
+
+  .yuvi-main-message-list {
+    gap: 18px;
+    padding-bottom: 20px;
+  }
+
+  .yuvi-main-message.is-user .yuvi-main-message-content {
+    max-width: 88%;
+  }
+
+  .yuvi-main-composer-dock {
+    padding: 18px 10px 10px;
+  }
+
+  .yuvi-main-composer {
+    grid-template-columns: minmax(0, 1fr) 36px 36px;
+    min-height: 54px;
+    border-radius: 21px;
+    padding: 7px 7px 7px 13px;
+  }
+
+  .yuvi-main-composer-button {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-height: 620px) {
+  .yuvi-main-thread {
+    padding-top: 14px;
+  }
+
+  .yuvi-main-empty {
+    min-height: 10rem;
+    padding-bottom: 4vh;
+  }
+
+  .yuvi-main-composer-dock {
+    padding-top: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .yuvi-main-thinking span {
+    animation: none;
+  }
+}
