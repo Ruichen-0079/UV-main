@@ -2,13 +2,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
-import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readPortablePackageIdentity, resolvePortableStateDirs, resolvePortableStateRoot } from './portable-state.mjs';
 const root = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
-const state = path.resolve(process.env.YUVI_PORTABLE_STATE_ROOT || path.join(process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME) ? process.env.XDG_DATA_HOME : path.join(os.homedir(), '.local/share'), 'YUVI', 'portable'));
-if (state === root || state.startsWith(root + path.sep)) throw new Error('Portable state must be outside the package tree.');
-const dirs = Object.fromEntries(['config', 'data', 'cache', 'tmp', 'supervisor', 'home'].map(k => [k, path.join(state, k)]));
+const packageIdentity = readPortablePackageIdentity(root);
+const state = resolvePortableStateRoot({ packageRoot: root, identity: packageIdentity });
+const dirs = resolvePortableStateDirs(state);
 process.umask(0o077);
 for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const pointer = path.join(dirs.supervisor, 'active-instance.json');
