@@ -1,0 +1,85 @@
+@font-face {
+  font-family: "YUVI Noto Sans SC";
+  src: url("/yuvi-fonts/NotoSansSC-VF.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "YUVI Noto Sans Mono";
+  src: url("/yuvi-fonts/NotoSansMono-VF.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-stretch: 62.5% 100%;
+  font-display: swap;
+}
+
+:root {
+  --yuvi-font-body: "YUVI Noto Sans SC", sans-serif;
+  --yuvi-font-conversation: var(--yuvi-font-body);
+  --yuvi-font-heading: var(--yuvi-font-body);
+  --yuvi-font-label: var(--yuvi-font-body);
+  --yuvi-font-control: var(--yuvi-font-body);
+  --yuvi-font-subtitle: var(--yuvi-font-body);
+  --yuvi-font-mono: "YUVI Noto Sans Mono", "YUVI Noto Sans SC", monospace;
+}
+
+html,
+body,
+#root {
+  font-family: var(--yuvi-font-body);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: var(--yuvi-font-control);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--yuvi-font-heading);
+}
+
+.label,
+.setting-label,
+.yuvi-health-chip-label,
+.yuvi-settings-nav-title,
+.yuvi-table-head,
+.yuvi-settings-nav-item,
+.yuvi-live2d-archive span {
+  font-family: var(--yuvi-font-label);
+}
+
+.assistant-markdown,
+.yuvi-chat-thread,
+.yuvi-composer textarea {
+  font-family: var(--yuvi-font-conversation);
+}
+
+.yuvi-subtitle-text {
+  font-family: var(--yuvi-font-subtitle);
+}
+
+code,
+kbd,
+samp,
+pre,
+.yuvi-diagnostics-log {
+  font-family: var(--yuvi-font-mono);
+}
+
+/* Product CSS historically names platform mono fonts directly. Keep the visual
+ * rules there, but make this final typography layer the single font authority. */
+.yuvi-diagnostics-log,
+.yuvi-code,
+.yuvi-mono,
+[class~="font-mono"] {
+  font-family: var(--yuvi-font-mono) !important;
+}
