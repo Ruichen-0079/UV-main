@@ -4,6 +4,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { assertFontCoverage } from "./font-coverage.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PRODUCT_FONT_ROOT = path.join(repoRoot, "apps", "web", "public", "yuvi-fonts");
@@ -20,7 +21,8 @@ export const PRODUCT_FONTS = Object.freeze([
     licenseSource:
       "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE",
     licenseFilename: "Noto-Sans-SC-OFL-1.1.txt",
-    minimumBytes: 10_000_000
+    minimumBytes: 10_000_000,
+    coverageSample: "YUVI 设置 记忆 模型 提供商 路由 伴侣 字幕 你好，。！？“”《》AaZz09—()[]{}<>/@#&+="
   }),
   Object.freeze({
     family: "YUVI Noto Sans Mono",
@@ -32,7 +34,8 @@ export const PRODUCT_FONTS = Object.freeze([
     licenseSource:
       "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/9b7310b8f99fcd2583c49606e6aefca13a391350/OFL.txt",
     licenseFilename: "Noto-Sans-Mono-OFL-1.1.txt",
-    minimumBytes: 500_000
+    minimumBytes: 500_000,
+    coverageSample: "YUVI AaZz09_-/.:;()[]{}<>@#&+=`'\"\\|*!?"
   })
 ]);
 
@@ -99,6 +102,7 @@ async function ensureFont(asset, priorManifest) {
   if (!stat.isFile() || stat.size < asset.minimumBytes || !hasOpenTypeSignature(destination)) {
     throw new Error(`Prepared font failed validation: ${asset.filename}`);
   }
+  assertFontCoverage(destination, asset.coverageSample, asset.family);
   return {
     family: asset.family,
     filename: asset.filename,
@@ -108,7 +112,8 @@ async function ensureFont(asset, priorManifest) {
     bytes: stat.size,
     sha256: sha256File(destination),
     license: "OFL-1.1",
-    licenseFilename: asset.licenseFilename
+    licenseFilename: asset.licenseFilename,
+    coverageSample: asset.coverageSample
   };
 }
 
