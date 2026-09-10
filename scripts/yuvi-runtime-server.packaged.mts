@@ -66,6 +66,11 @@ async function main(): Promise<void> {
   }
 
   await preparePackagedPostgres();
+  if (process.env["YUVI_PACKAGED_MIGRATE_ONLY"] === "1") {
+    console.info("[postgres] packaged migration-only gate completed.");
+    return;
+  }
+
   const config = loadServerConfig();
   const app = await buildServer(config);
 

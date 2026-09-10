@@ -37,10 +37,20 @@ test("Portable launcher keeps instance identity isolated while restoring durable
   assert.doesNotMatch(launcher, /YUVI_AUTOSTART_LOCAL_STT:\s*'0'/);
   assert.doesNotMatch(launcher, /YUVI_AUTOSTART_TTS:\s*'0'/);
 
-  // These three guards are deliberately temporary until A9 packages managed Mem0/PostgreSQL.
-  assert.match(launcher, /YUVI_PACKAGED_EXTERNAL_SIDECARS: '1'/);
-  assert.match(launcher, /YUVI_POSTGRES_MODE: 'external'/);
-  assert.match(launcher, /YUVI_AUTOSTART_MEM0: '0'/);
+  // A9 packages and owns private PostgreSQL + Mem0. Portable must no longer disable them.
+  assert.doesNotMatch(launcher, /YUVI_PACKAGED_EXTERNAL_SIDECARS:\s*'1'/);
+  assert.doesNotMatch(launcher, /YUVI_POSTGRES_MODE:\s*'external'/);
+  assert.doesNotMatch(launcher, /YUVI_AUTOSTART_MEM0:\s*'0'/);
+});
+
+test("Portable starts Tauri after the control plane but before waiting for Runtime", () => {
+  const controlReady = launcher.indexOf("const controlDeadline");
+  const desktopStart = launcher.indexOf("desktop = spawn(desktopShell");
+  const runtimeWait = launcher.indexOf("const runtimeDeadline");
+  assert.ok(controlReady >= 0);
+  assert.ok(desktopStart > controlReady);
+  assert.ok(runtimeWait > desktopStart);
+  assert.match(launcher, /durable Memory bootstrap/);
 });
 
 test("Portable secret namespace follows the validated release version", () => {

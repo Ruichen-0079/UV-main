@@ -14,6 +14,12 @@ const webServer = path.join(resourceRoot, "web", "static-server.mjs");
 const webDist = path.join(resourceRoot, "web", "dist");
 const localStt = path.join(resourceRoot, "local-stt", "yuvi-local-stt");
 const localSttManifest = path.join(resourceRoot, "local-stt", "local-stt-manifest.json");
+const mem0 = path.join(resourceRoot, "mem0", "yuvi-mem0");
+const mem0Manifest = path.join(resourceRoot, "mem0", "mem0-manifest.json");
+const postgres = path.join(resourceRoot, "postgres", "bin", "postgres");
+const pgCtl = path.join(resourceRoot, "postgres", "bin", "pg_ctl");
+const initdb = path.join(resourceRoot, "postgres", "bin", "initdb");
+const vectorControl = path.join(resourceRoot, "postgres", "share", "extension", "vector.control");
 const desktopShell = path.join(resourceRoot, "desktop", "yuvi-desktop");
 const desktopLauncher = path.join(resourceRoot, "desktop", "yuvi-desktop-launcher");
 for (const f of [
@@ -24,6 +30,12 @@ for (const f of [
   webDist,
   localStt,
   localSttManifest,
+  mem0,
+  mem0Manifest,
+  postgres,
+  pgCtl,
+  initdb,
+  vectorControl,
   desktopShell,
   desktopLauncher,
   path.join(resourceRoot, "desktop", "yuvi.png")
@@ -93,7 +105,7 @@ const desktopExecArg = (v) =>
   '"' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%") + '"';
 const pathEnv = ["/usr/local/bin", "/usr/bin", "/bin"].filter((p) => fs.existsSync(p)).join(":");
 const common = (wd) =>
-  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_PACKAGED_EXTERNAL_SIDECARS=1\nEnvironment=YUVI_POSTGRES_MODE=external\nEnvironment=YUVI_AUTOSTART_MEM0=0\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
+  `WorkingDirectory=${wd.replace(/%/g, "%%")}\nEnvironment=${quote("PATH=" + pathEnv)}\nEnvironment=${quote("YUVI_RUNTIME_ENV_DIR=" + envDir)}\nEnvironment=YUVI_DAILY_USE_SYSTEMD=1\nEnvironment=YUVI_AUTOSTART_LOCAL_STT=0\nTimeoutStopSec=90\nKillMode=mixed\n`;
 fs.mkdirSync(unitDir, { recursive: true });
 fs.mkdirSync(applications, { recursive: true });
 const execDaily = `${quote(nodeBin)} ${quote(supervisor)} --mode packaged --resource-root ${quote(resourceRoot)} --state-root ${quote(stateRoot)} --runtime-manifest ${quote(runtimeManifest)}`;
