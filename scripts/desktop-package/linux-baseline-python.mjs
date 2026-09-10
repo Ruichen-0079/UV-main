@@ -20,6 +20,10 @@ const epoch = execFileSync("git", ["show", "-s", "--format=%ct", "HEAD"], {
   cwd: REPO_ROOT,
   encoding: "utf8"
 }).trim();
+// Preserve the service builder's working directory inside the mounted checkout.
+const relativeCwd = path.relative(REPO_ROOT, process.cwd());
+if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd))
+  throw new Error("Linux Python build must run inside the release checkout.");
 const result = spawnSync(
   "bwrap",
   [
@@ -54,7 +58,7 @@ const result = spawnSync(
     "SOURCE_DATE_EPOCH",
     epoch,
     "--chdir",
-    "/workspace",
+    path.posix.join("/workspace", relativeCwd),
     "/opt/yuvi-release-build/bin/python",
     ...args
   ],
