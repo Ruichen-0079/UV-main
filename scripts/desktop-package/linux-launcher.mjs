@@ -5,6 +5,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { portableSecretNamespace, readPortablePackageIdentity, resolvePortableStateDirs, resolvePortableStateRoot } from './portable-state.mjs';
+import { CUBISM_CORE_FILENAME, cubismCoreStatus, provisionCubismCore } from './provision-cubism-core.mjs';
 const root = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
 const packageIdentity = readPortablePackageIdentity(root);
 const secretNamespace = portableSecretNamespace(packageIdentity);
@@ -41,6 +42,18 @@ try {
   } else if (command === 'stop') {
     await control('/v1/shutdown');
     console.log('YUVI shutdown requested.');
+  } else if (command === 'cubism-core') {
+    const action = process.argv[3] || 'status';
+    if (action === 'status') {
+      console.log(JSON.stringify(cubismCoreStatus({ dataRoot: dirs.data }), null, 2));
+    } else if (action === 'import') {
+      const sourcePath = process.argv[4];
+      if (!sourcePath) throw new Error(`Usage: ./yuvi cubism-core import /path/to/${CUBISM_CORE_FILENAME}`);
+      const result = provisionCubismCore({ sourcePath, dataRoot: dirs.data });
+      console.log(`Cubism Core provisioned: ${result.destination}\nsha256=${result.sha256}\nRestart YUVI before loading Live2D.`);
+    } else {
+      throw new Error('Usage: ./yuvi cubism-core [status|import /path/to/live2dcubismcore.min.js]');
+    }
   } else if (command === 'start') {
     const runtimePort = 16121, webPort = 15173, sttPort = 19876;
     for (const port of [runtimePort, webPort, sttPort]) await available(port);
@@ -129,5 +142,5 @@ try {
       web.once('error', stop); web.once('exit', stop);
       console.log(`YUVI desktop shell started. Browser fallback: http://127.0.0.1:${webPort}/#/webui\nRun ./yuvi stop to shut down.`);
     }
-  } else throw new Error('Usage: ./yuvi [start|stop|status]');
+  } else throw new Error('Usage: ./yuvi [start|stop|status|cubism-core]');
 } catch (error) { console.error(error.message); process.exitCode = 1; }
