@@ -62,7 +62,7 @@ def stage_runtime_notices(output: Path) -> None:
         for file in (Path(sys.base_prefix) / "lib" / "python3.11" / "lib-dynload").glob("*.so"):
             add(file, {"component": "CPython", "version": sys.version.split()[0], "origin": "Debian Python image"})
         add(Path(sys.base_prefix) / "lib/libpython3.11.so.1.0", {"component": "CPython", "version": sys.version.split()[0], "origin": "Debian Python image"})
-        for package in ["libssl3", "libffi8", "libbz2-1.0", "liblzma5", "libtinfo6"]:
+        for package in ["libssl3", "libffi8", "libbz2-1.0", "liblzma5", "libtinfo6", "libuuid1"]:
             paths = subprocess.check_output(["dpkg-query", "-L", package], text=True).splitlines()
             version = subprocess.check_output(["dpkg-query", "-W", "-f=${Version}", package], text=True)
             for file in paths:
