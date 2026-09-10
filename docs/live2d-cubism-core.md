@@ -69,13 +69,19 @@ If the installation intentionally uses another absolute YUVI data root, pass the
 
 ## Runtime verification
 
-After restart, the existing Runtime Core route must serve the managed Core rather than a machine-random path. For the normal Installed Runtime port:
+After restart, verify the existing Product proxy serves the managed Core rather than a machine-random path. For Installed Linux:
 
 ```sh
-curl -f http://127.0.0.1:6121/api/live2d-core/live2dcubismcore.min.js >/dev/null
+curl -f http://127.0.0.1:5173/api/live2d-core/live2dcubismcore.min.js >/dev/null
 ```
 
-For Portable, use that instance's verified Runtime origin/port instead of falling back to Installed port 6121.
+For Portable Linux, use its own Product origin instead of Installed ports:
+
+```sh
+curl -f http://127.0.0.1:15173/api/live2d-core/live2dcubismcore.min.js >/dev/null
+```
+
+The Product proxy strips `/api` and forwards to the matching Runtime's existing `/live2d-core/live2dcubismcore.min.js` route.
 
 A complete product acceptance still requires all of the following on a machine where the user has legitimately obtained the official Core and a valid model package:
 
