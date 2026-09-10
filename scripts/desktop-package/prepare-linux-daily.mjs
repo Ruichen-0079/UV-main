@@ -132,6 +132,19 @@ export async function prepareLinuxDailyPackage() {
   await buildLinuxWeb();
   const webDistSrc = path.join(REPO_ROOT, "apps", "web", "dist");
   assertDir(webDistSrc, "apps/web/dist");
+  const typographyManifestPath = path.join(webDistSrc, "yuvi-fonts", "fonts-manifest.json");
+  assertFile(typographyManifestPath, "offline typography manifest");
+  const typographyManifest = JSON.parse(fs.readFileSync(typographyManifestPath, "utf8"));
+  if (
+    typographyManifest.schemaVersion !== 1 ||
+    typographyManifest.runtimeNetworkFetch !== false ||
+    !Number.isFinite(typographyManifest.fontBytes) ||
+    typographyManifest.fontBytes <= 0 ||
+    !Array.isArray(typographyManifest.fonts) ||
+    typographyManifest.fonts.length < 2
+  ) {
+    throw new Error("Offline typography manifest is invalid.");
+  }
   copyTreeFiltered(webDistSrc, path.join(webDir, "dist"), new Set());
   fs.copyFileSync(
     path.join(REPO_ROOT, "scripts", "desktop-package", "linux-static-web-server.mjs"),
@@ -211,6 +224,7 @@ export async function prepareLinuxDailyPackage() {
       "postgresql-16-pgvector",
       "mem0-sidecar",
       "static-web",
+      "offline-typography-fonts",
       "tauri-desktop-shell",
       "local-stt-sidecar",
       "local-stt-models",
@@ -221,6 +235,10 @@ export async function prepareLinuxDailyPackage() {
     genericLocalSttWeightsBundled: true,
     managedMemorySidecars: true,
     externalSidecars: true,
+    typographyBundled: true,
+    typographyRuntimeNetworkFetch: false,
+    typographyFontBytes: typographyManifest.fontBytes,
+    typographyFamilies: typographyManifest.fonts.map((font) => font.family),
     cubismCoreBundled: false,
     cubismCoreProvisioning: "required-user-import",
     cubismCoreExpectedFilename: "live2dcubismcore.min.js"

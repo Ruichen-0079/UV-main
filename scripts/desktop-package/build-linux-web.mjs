@@ -4,8 +4,10 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "./constants.mjs";
 import { javascriptNotices } from "./javascript-notices.mjs";
+import { prepareProductFonts } from "../prepare-product-fonts.mjs";
 export async function buildLinuxWeb() {
   const webRoot = path.join(REPO_ROOT, "apps/web");
+  await prepareProductFonts();
   const require = createRequire(path.join(webRoot, "package.json"));
   const viteRoot = path.dirname(require.resolve("vite/package.json"));
   const { build } = await import(pathToFileURL(path.join(viteRoot, "dist/node/index.js")).href);
