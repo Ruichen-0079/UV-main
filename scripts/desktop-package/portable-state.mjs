@@ -29,6 +29,14 @@ export function readPortablePackageIdentity(packageRoot) {
   return Object.freeze({ version: manifest.version, checkoutSha: manifest.checkoutSha });
 }
 
+/** Stable Secret Service namespace: shared by one Portable release, never Installed/cross-version. */
+export function portableSecretNamespace(identity) {
+  if (!identity || typeof identity.version !== "string" || !PRODUCT_VERSION.test(identity.version)) {
+    throw new Error("Portable secret namespace identity is invalid.");
+  }
+  return `YUVI-portable-${identity.version}`;
+}
+
 export function resolvePortableStateRoot({
   packageRoot,
   env = process.env,
