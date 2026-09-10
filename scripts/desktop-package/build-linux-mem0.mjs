@@ -290,6 +290,11 @@ export function buildLinuxPackagedMem0(options = {}) {
     `${JSON.stringify(LINUX_MEM0_MANIFEST, null, 2)}\n`,
     { encoding: "utf8", mode: 0o644 }
   );
+  // PyInstaller's grpc hook collects SDK headers/type stubs as data. They are
+  // build inputs, not runtime dependencies, and the public artifact forbids them.
+  for (const file of listFiles(path.join(artifactDir, "_internal"))) {
+    if ([".h", ".hpp", ".pyi"].includes(path.extname(file))) fs.unlinkSync(file);
+  }
   const artifact = validateLinuxMem0Artifact(artifactDir, { repoRoot: REPO_ROOT });
   return { ...artifact, python };
 }
