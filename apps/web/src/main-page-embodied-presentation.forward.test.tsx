@@ -110,7 +110,8 @@ vi.mock("./user-settings-client.js", () => ({
     revision: 1,
     settings: {
       proactive: { enabled: true },
-      tts: { enabled: true, mode: "external" }
+      tts: { enabled: true, mode: "external" },
+      memory: { enabled: true }
     }
   })),
   subscribeUserSettingsChanged: vi.fn(() => () => undefined)

@@ -7,57 +7,72 @@ import {
   voicePlaybackStatusLabel
 } from "./main-page.js";
 import { createSpeechPlaybackCorrelation } from "./speech-playback-correlation.js";
-import { VOICE_OUTPUT_STORAGE_KEY } from "./voice-output.js";
 
 function renderMainPage(): string {
   return renderToStaticMarkup(<MainPage />);
-}
-
-function readTtsToggleChecked(markup: string): boolean {
-  const toggle = markup.match(/<input[^>]*data-testid="tts-output-toggle"[^>]*>/)?.[0];
-  expect(toggle, "expected the TTS output checkbox to be rendered").toBeTruthy();
-  return toggle?.includes("checked") ?? false;
 }
 
 afterEach(() => {
   delete (globalThis as { localStorage?: unknown }).localStorage;
 });
 
-describe("MainPage TTS output preference", () => {
-  it("initializes the TTS checkbox from the persisted preference", () => {
-    (globalThis as { localStorage?: unknown }).localStorage = {
-      getItem: (key: string) => (key === VOICE_OUTPUT_STORAGE_KEY ? "true" : null),
-      setItem: () => {}
-    };
-    expect(readTtsToggleChecked(renderMainPage())).toBe(true);
+describe("MainPage product presentation", () => {
+  it("renders a quiet conversation shell with history and one composer", () => {
+    const markup = renderMainPage();
+
+    expect(markup).toContain("yuvi-main-chat");
+    expect(markup).toContain("What would you like to talk about?");
+    expect(markup).toContain('aria-label="Chat message"');
+    expect(markup).toContain('aria-label="Start Voice Mode"');
+    expect(markup).toContain('aria-label="Send message"');
+    expect(markup).toContain("Message YUVI");
   });
 
-  it("initializes the TTS checkbox on when nothing was stored", () => {
-    (globalThis as { localStorage?: unknown }).localStorage = {
-      getItem: () => null,
-      setItem: () => {}
-    };
-    expect(readTtsToggleChecked(renderMainPage())).toBe(true);
+  it("keeps operational and debug controls out of ordinary Main", () => {
+    const markup = renderMainPage();
+
+    for (const hidden of [
+      "Service status",
+      "Chat History</",
+      "Voice input</",
+      "Turn Options",
+      "Session ID",
+      "Read Memory",
+      "Write Memory",
+      "TTS output",
+      ">WebUI<",
+      "显示形象",
+      "隐藏形象",
+      "重新打开",
+      "companion connected",
+      "companion offline",
+      "Record voice",
+      "Transcribe recording",
+      "Type a runtime test message",
+      "Latest trace"
+    ]) {
+      expect(markup).not.toContain(hidden);
+    }
   });
 
-  it("renders without crashing when localStorage is unavailable", () => {
+  it("does not expose a fake image attachment before the multimodal atom", () => {
+    const markup = renderMainPage();
+    expect(markup).not.toContain('type="file"');
+    expect(markup).not.toContain("Attach image");
+  });
+
+  it("renders safely when localStorage is unavailable", () => {
     expect(() => renderMainPage()).not.toThrow();
   });
 });
 
 describe("MainPage voice input", () => {
-  it("exposes ordinary microphone capture and transcription actions", () => {
+  it("exposes one microphone affordance backed by existing Voice Mode", () => {
     const markup = renderMainPage();
-    expect(markup).toContain("Voice input");
-    expect(markup).toContain("Start Voice Mode");
-    expect(markup).toContain("Record voice");
-    expect(markup).toContain("Transcribe recording");
-  });
-});
-
-describe("MainPage chat presentation", () => {
-  it("does not render backend trace metadata in the ordinary chat surface", () => {
-    expect(renderMainPage()).not.toContain("Latest trace");
+    expect(markup).toContain('aria-label="Start Voice Mode"');
+    expect(markup).toContain('aria-pressed="false"');
+    expect(markup).not.toContain("Record voice");
+    expect(markup).not.toContain("Transcribe recording");
   });
 });
 

@@ -49,10 +49,7 @@ import {
   type SpeechPlaybackCorrelationState
 } from "./speech-playback-correlation.js";
 import type { SpeechSegmentIdentity } from "./speech-identity.js";
-import { EmptyState, Field, Notice, Panel, Pill, Toggle } from "./surface-ui.js";
-import { readVoiceOutputPreference, writeVoiceOutputPreference } from "./voice-output.js";
-import { controlCompanionWindow, controlWebUIWindow, isTauriRuntime } from "./tauri-window.js";
-import { ServiceStatusPanel } from "./service-status-panel.js";
+import { isTauriRuntime } from "./tauri-window.js";
 import { fetchUserSettings, subscribeUserSettingsChanged } from "./user-settings-client.js";
 import { initialServiceStatusState, type ServiceStatusState } from "./service-status-state.js";
 import {
@@ -97,8 +94,10 @@ export function MainPage(): JSX.Element {
   const [sessionId, setSessionId] = useState("default");
   const [readMemory, setReadMemory] = useState(true);
   const [writeMemory, setWriteMemory] = useState(true);
+  const [memoryPreferenceState, setMemoryPreferenceState] = useState<"loading" | "ready" | "unavailable">(
+    () => (isTauriRuntime() ? "loading" : "ready")
+  );
   const [promptPreview, setPromptPreview] = useState(true);
-  const [voiceOutput, setVoiceOutput] = useState<boolean>(readVoiceOutputPreference);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatusState>(initialServiceStatusState);
   const [ttsConfig, setTtsConfig] = useState<CompanionTtsConfiguration | null>(() =>
     isTauriRuntime() ? null : { enabled: true, mode: "external" }
@@ -113,10 +112,7 @@ export function MainPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [voicePlaybackStatus, setVoicePlaybackStatus] = useState<VoicePlaybackStatus>("idle");
   const [actualPlaybackActive, setActualPlaybackActive] = useState(false);
-  const [companionReady, setCompanionReady] = useState(false);
   const [input, setInput] = useState("");
-  const [companionActionError, setCompanionActionError] = useState<string | null>(null);
-  const [webUiActionError, setWebUiActionError] = useState<string | null>(null);
   const [voiceCaptureStatus, setVoiceCaptureStatus] = useState<VoiceCaptureStatus>("idle");
   const [recordedAudio, setRecordedAudio] = useState<RecordedAudio | null>(null);
   const [voiceTranscription, setVoiceTranscription] = useState<TranscriptionResponse | null>(null);
@@ -126,6 +122,7 @@ export function MainPage(): JSX.Element {
 
   const mountedRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const threadEndRef = useRef<HTMLDivElement>(null);
   const busRef = useRef<CompanionBus | null>(null);
   // Product Main must subscribe to Runtime Presentation requests and forward them
   // to Companion over CompanionBus (Debug App already does this). Fail-closed.
@@ -137,9 +134,9 @@ export function MainPage(): JSX.Element {
       });
     }
   });
-  const voiceOutputRef = useRef(voiceOutput);
   const ttsConfigRef = useRef(ttsConfig);
   const ttsConfigRevisionRef = useRef(-1);
+  const memoryPreferenceRevisionRef = useRef(-1);
   const proactiveConsentRef = useRef(proactiveConsent);
   const runtimeContextRef = useRef({ sessionId, readMemory, promptPreview });
   runtimeContextRef.current = { sessionId, readMemory, promptPreview };
@@ -186,19 +183,24 @@ export function MainPage(): JSX.Element {
     () =>
       deriveEffectiveVoiceOutput({
         persistentTtsEnabled: ttsConfig?.enabled ?? null,
-        perTurnVoiceOutput: voiceOutput,
+        // Main has no hidden per-turn TTS preference after A5. The durable
+        // Product TTS setting is the user-facing authority.
+        perTurnVoiceOutput: true,
         ttsCapability: capabilityProjection.capabilities.tts,
         ttsConfiguration: ttsConfig
       }),
-    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, ttsConfig?.mode, voiceOutput]
+    [capabilityProjection.capabilities.tts, ttsConfig?.enabled, ttsConfig?.mode]
   );
   const effectiveVoiceOutputRef = useRef(effectiveVoiceOutput);
   ttsConfigRef.current = ttsConfig;
   effectiveVoiceOutputRef.current = effectiveVoiceOutput;
 
   useEffect(() => {
-    voiceOutputRef.current = voiceOutput;
-  }, [voiceOutput]);
+    const end = threadEndRef.current;
+    if (end && typeof end.scrollIntoView === "function") {
+      end.scrollIntoView({ block: "end" });
+    }
+  }, [messages]);
 
   useEffect(() => {
     if (!isTauriRuntime() && !isServiceSupervisorAvailable()) return;
@@ -238,6 +240,16 @@ export function MainPage(): JSX.Element {
         setTtsConfig(settings);
       }
 
+      // Main no longer exposes per-turn Memory switches. Follow the existing
+      // durable Product setting instead of inventing a hidden replacement mode.
+      // Fence stale async reads exactly like the existing TTS projection.
+      if (view.revision >= memoryPreferenceRevisionRef.current) {
+        memoryPreferenceRevisionRef.current = view.revision;
+        setReadMemory(view.settings.memory.enabled);
+        setWriteMemory(view.settings.memory.enabled);
+        setMemoryPreferenceState(view.loadError === null ? "ready" : "unavailable");
+      }
+
       if (view.loadError !== null) {
         applyProactiveConsent({
           type: "settings-read-failed",
@@ -259,6 +271,9 @@ export function MainPage(): JSX.Element {
         .then((view) => applySettingsView(view, requestRevision))
         .catch(() => {
           if (!cancelled) {
+            setMemoryPreferenceState((current) =>
+              current === "loading" ? "unavailable" : current
+            );
             applyProactiveConsent({ type: "settings-read-failed", requestRevision });
             void apiClient.setProactiveConsent(false).catch(() => undefined);
           }
@@ -269,6 +284,7 @@ export function MainPage(): JSX.Element {
       .then((view) => applySettingsView(view, initialRequestRevision))
       .catch(() => {
         if (!cancelled) {
+          setMemoryPreferenceState("unavailable");
           // Keep the existing TTS capability unknown and keep proactive consent denied.
           applyProactiveConsent({
             type: "settings-read-failed",
@@ -288,7 +304,18 @@ export function MainPage(): JSX.Element {
       if (invalidated) {
         void apiClient.setProactiveConsent(false).catch(() => undefined);
       }
-      if (invalidated || event.changedSections.includes("tts")) {
+      if (event.changedSections.includes("memory")) {
+        memoryPreferenceRevisionRef.current = Math.max(
+          memoryPreferenceRevisionRef.current,
+          event.revision
+        );
+        setMemoryPreferenceState("loading");
+      }
+      if (
+        invalidated ||
+        event.changedSections.includes("tts") ||
+        event.changedSections.includes("memory")
+      ) {
         refetchSettingsProjection(event.revision);
       }
     });
@@ -316,10 +343,9 @@ export function MainPage(): JSX.Element {
     const unsubscribe = bus.subscribe((message: CompanionBusMessage) => {
       if (!mountedRef.current) return;
       if (message.kind === "companion-ready") {
-        setCompanionReady(true);
-        // A companion window may have been recreated; re-sync the current
-        // voice-enabled preference so TTS state converges without a reload.
-        bus.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+        // A companion window may have been recreated; re-sync the active
+        // voice channel so TTS state converges without a reload.
+        bus.post({ kind: "voice-enabled", enabled: true });
         bus.post({ kind: "tts-config", config: ttsConfigRef.current });
       } else if (message.kind === "speech-status") {
         if (speechEpochRef.current !== message.requestId) return;
@@ -356,9 +382,9 @@ export function MainPage(): JSX.Element {
         handleProactiveTextRequest(message);
       }
     });
-    // Announce the persisted preference so a companion that is already open
-    // (or opens later) starts with the same voice-enabled state.
-    bus.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+    // Main no longer owns a hidden per-turn TTS preference. Keep the
+    // Companion voice channel enabled; persistent tts.enabled remains authoritative.
+    bus.post({ kind: "voice-enabled", enabled: true });
     bus.post({ kind: "tts-config", config: ttsConfigRef.current });
     return () => {
       mountedRef.current = false;
@@ -440,19 +466,6 @@ export function MainPage(): JSX.Element {
     busRef.current?.post({ kind: "tts-config", config: ttsConfig });
   }, [ttsConfig]);
 
-  function updateVoiceOutput(enabled: boolean): void {
-    setVoiceOutput(enabled);
-    writeVoiceOutputPreference(enabled);
-    voiceOutputRef.current = enabled;
-    if (!enabled) {
-      setVoicePlaybackStatus("idle");
-      setActualPlaybackActive(false);
-      speechEpochRef.current = null;
-      playbackCorrelationRef.current = retireActiveSpeechPlayback(playbackCorrelationRef.current);
-    }
-    busRef.current?.post({ kind: "voice-enabled", enabled });
-  }
-
   function cancelActiveProactiveRequest(active: ActiveRequestOwnership): void {
     if (!isCurrentRequest(activeRequestRef.current, active)) return;
     // Clear the page owner before aborting so the rejected promise and any
@@ -468,6 +481,7 @@ export function MainPage(): JSX.Element {
   }
 
   async function send(): Promise<void> {
+    if (memoryPreferenceState !== "ready") return;
     // Capture the exact draft once, then clear the controlled state immediately
     // so async work never re-reads or restores the textarea contents.
     const submit = beginControlledDraftSubmit(input);
@@ -480,7 +494,10 @@ export function MainPage(): JSX.Element {
     const content = submit.submittedText;
     setInput(submit.nextDraft);
     setError(null);
-    inputRef.current?.focus();
+    if (inputRef.current) {
+      inputRef.current.style.height = "";
+      inputRef.current.focus();
+    }
     const requestId = createSurfaceId("turn");
     const assistantId = createSurfaceId("assistant");
     const controller = new AbortController();
@@ -499,7 +516,7 @@ export function MainPage(): JSX.Element {
     setRequestStatus("sending");
     const bus = busRef.current;
     bus?.post({ kind: "user-gesture" });
-    bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+    bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const segmenter = new SpeechSegmenter();
     if (shouldRequestTts) {
@@ -521,7 +538,7 @@ export function MainPage(): JSX.Element {
         useMemory: readMemory && writeMemory,
         readMemory,
         writeMemory,
-        voiceOutput: voiceOutputRef.current,
+        voiceOutput: shouldRequestTts,
         status: "completed"
       },
       assistant: {
@@ -848,7 +865,12 @@ export function MainPage(): JSX.Element {
   }
 
   async function startLiveSpeech(): Promise<void> {
-    if (liveSpeechStatus !== "idle" || voiceCaptureStatus !== "idle") return;
+    if (
+      memoryPreferenceState !== "ready" ||
+      liveSpeechStatus !== "idle" ||
+      voiceCaptureStatus !== "idle"
+    )
+      return;
     setVoiceError(null);
     setLiveSpeechStatus("requesting");
     try {
@@ -951,6 +973,7 @@ export function MainPage(): JSX.Element {
   }
 
   async function sendHandsFreeTurn(content: string, observationId?: string): Promise<void> {
+    if (memoryPreferenceState !== "ready") return;
     const active = activeRequestRef.current;
     if (active?.origin === "user") {
       if (active.completedObserved) {
@@ -982,7 +1005,7 @@ export function MainPage(): JSX.Element {
     setRequestStatus("sending");
     const bus = busRef.current;
     bus?.post({ kind: "user-gesture" });
-    bus?.post({ kind: "voice-enabled", enabled: voiceOutputRef.current });
+    bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     if (shouldRequestTts) {
       speechSessionRef.current = {
@@ -1008,7 +1031,7 @@ export function MainPage(): JSX.Element {
         useMemory: readMemory && writeMemory,
         readMemory,
         writeMemory,
-        voiceOutput: voiceOutputRef.current,
+        voiceOutput: shouldRequestTts,
         status: "completed"
       },
       assistant: {
@@ -1192,280 +1215,211 @@ export function MainPage(): JSX.Element {
     }
   }
 
-  async function controlCompanion(
-    action: "show_companion" | "hide_companion" | "reopen_companion"
-  ): Promise<void> {
-    setCompanionActionError(null);
-    try {
-      await controlCompanionWindow(action);
-    } catch {
-      setCompanionActionError("无法控制 companion 窗口。");
-    }
-  }
-
-  async function openWebUI(): Promise<void> {
-    setWebUiActionError(null);
-    try {
-      await controlWebUIWindow();
-    } catch {
-      setWebUiActionError("无法打开 WebUI。");
-    }
-  }
+  const microphoneActive = liveSpeechStatus === "listening";
+  const microphoneBusy = liveSpeechStatus === "requesting";
+  const microphoneLabel = microphoneActive ? t("Stop Voice Mode") : t("Start Voice Mode");
+  const voiceStatus =
+    liveSpeechStatus === "requesting"
+      ? t("Connecting microphone…")
+      : microphoneActive
+        ? liveSpeechActive
+          ? t("Listening…")
+          : t("Voice input is on")
+        : "";
+  const playbackStatus =
+    voicePlaybackStatus !== "idle"
+      ? t(voicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive))
+      : "";
+  const settingsStatus =
+    memoryPreferenceState === "loading"
+      ? t("Loading conversation settings…")
+      : memoryPreferenceState === "unavailable"
+        ? t("Conversation settings unavailable")
+        : "";
 
   return (
-    <div className="min-h-screen bg-ink-100">
-      <ServiceStatusPanel />
-      <div className="mx-auto max-w-3xl space-y-4 p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal">{t("YUVI Chat")}</h1>
-            <p className="mt-1 text-sm text-ink-500">{t("Main window: chat input and streaming text. Speech playback and Live2D rendering live in the companion window.")}</p>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Pill status={companionReady ? t("companion connected") : t("companion offline")} />
-            {isTauriRuntime() && (
-              <>
-                <button type="button" className="button-secondary" onClick={() => void openWebUI()}>
-                  WebUI
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("show_companion")}
-                >
-                  显示形象
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("hide_companion")}
-                >
-                  隐藏形象
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void controlCompanion("reopen_companion")}
-                >
-                  重新打开
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        <Panel title={t("Chat History")} actions={<Pill status={requestStatus} />}>
-          <div className="h-[420px] overflow-auto rounded-md border border-ink-100 bg-ink-50 p-3">
+    <div className="yuvi-main-chat">
+      <main className="yuvi-main-chat-shell" aria-label={t("YUVI Chat")}>
+        <section className="yuvi-main-thread" aria-label={t("Chat History")}>
+          <div className="yuvi-main-thread-inner">
             {messages.length === 0 ? (
-              <EmptyState title={t("No chat yet")} message={t("Send a message to exercise the runtime.")} />
+              <div className="yuvi-main-empty">
+                <div className="yuvi-main-empty-mark" aria-hidden="true">
+                  y
+                </div>
+                <p>{t("What would you like to talk about?")}</p>
+              </div>
             ) : (
-              <div className="space-y-3">
+              <div className="yuvi-main-message-list">
                 {messages.map((message) => (
-                  <div
+                  <article
                     key={message.id}
-                    className={`rounded-md border p-3 ${message.role === "user" ? "border-cyan-100 bg-white" : "border-ink-200 bg-white"}`}
+                    className={
+                      message.role === "user"
+                        ? "yuvi-main-message is-user"
+                        : "yuvi-main-message is-assistant"
+                    }
                   >
-                    <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-ink-500">
-                      <span>{message.role}</span>
-                      {message.role === "assistant" && message.status && (
-                        <span aria-live="polite">{t(chatStatusLabel(message.status))}</span>
-                      )}
+                    <div className="yuvi-main-message-content">
+                      <ChatMessageContent role={message.role} content={message.content} />
+                      {message.role === "assistant" &&
+                        message.status === "streaming" &&
+                        !message.content && (
+                          <span className="yuvi-main-thinking" role="status" aria-label={t("Generating")}>
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        )}
                     </div>
-                    <ChatMessageContent role={message.role} content={message.content} />
                     {message.error && (
-                      <div className="mt-2 text-xs text-red-700" role="alert">
+                      <div className="yuvi-main-message-error" role="alert">
                         {message.error}
                       </div>
                     )}
-                  </div>
+                  </article>
                 ))}
               </div>
             )}
+            <div ref={threadEndRef} aria-hidden="true" />
           </div>
-          {error && (
-            <div className="mt-2">
-              <Notice tone="error" title={t("Send failed")} message={error} />
-            </div>
-          )}
-          {companionActionError && (
-            <div className="mt-2">
-              <Notice tone="error" title={t("Companion")} message={companionActionError} />
-            </div>
-          )}
-          {webUiActionError && (
-            <div className="mt-2">
-              <Notice tone="error" title="WebUI" message={webUiActionError} />
-            </div>
-          )}
-          <div className="mt-3 flex gap-2">
-            <textarea
-              ref={inputRef}
-              className="field min-h-20"
-              placeholder={t("Type a runtime test message")}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (shouldSubmitChatKey(event)) {
-                  event.preventDefault();
-                  void send();
-                }
-              }}
-              aria-label={t("Chat message")}
-            />
-            {requestStatus === "sending" ? (
-              <button
-                type="button"
-                className="button-secondary h-20 w-24"
-                onClick={stopGeneration}
-                aria-label={t("Stop generating")}
-              >{t("Stop")}</button>
-            ) : (
-              <button
-                type="button"
-                className="button-primary h-20 w-24"
-                disabled={!input.trim()}
-                onClick={() => void send()}
-                aria-label={t("Send message")}
-              >{t("Send")}</button>
-            )}
-            {(actualPlaybackActive ||
-              voicePlaybackStatus === "synthesizing" ||
-              voicePlaybackStatus === "playing") && (
-              <button
-                type="button"
-                className="button-secondary h-20 w-24"
-                onClick={stopSpeech}
-                aria-label={t("Stop speech")}
-              >{t("Stop speech")}</button>
-            )}
-          </div>
-          {voiceOutput && voicePlaybackStatus !== "idle" && (
-            <div className="mt-2 text-xs text-ink-500" aria-live="polite">
-              {t(voicePlaybackStatusLabel(voicePlaybackStatus, actualPlaybackActive))}
-            </div>
-          )}
-        </Panel>
+        </section>
 
-        <Panel
-          title={t("Voice input")}
-          actions={
-            <Pill status={liveSpeechStatus === "listening" ? t("listening") : voiceCaptureStatus} />
-          }
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className={liveSpeechStatus === "listening" ? "button-secondary" : "button-primary"}
-              disabled={
-                (liveSpeechStatus !== "idle" && liveSpeechStatus !== "listening") ||
-                voiceCaptureStatus !== "idle"
-              }
-              onClick={() =>
-                void (liveSpeechStatus === "listening" ? stopLiveSpeech() : startLiveSpeech())
-              }
-              aria-label={liveSpeechStatus === "listening" ? t("Stop Voice Mode") : t("Start Voice Mode")}
-            >
-              {liveSpeechStatus === "requesting"
-                ? "Requesting microphone…"
-                : liveSpeechStatus === "listening"
-                  ? liveSpeechActive
-                    ? "Speech active — stop"
-                    : "Voice Mode listening — stop"
-                  : t("Start Voice Mode")}
-            </button>
-            <button
-              type="button"
-              className={voiceCaptureStatus === "recording" ? "button-secondary" : "button-primary"}
-              disabled={
-                (voiceCaptureStatus !== "idle" && voiceCaptureStatus !== "recording") ||
-                liveSpeechStatus !== "idle"
-              }
-              onClick={() =>
-                void (voiceCaptureStatus === "recording" ? stopVoiceCapture() : startVoiceCapture())
-              }
-              aria-label={voiceCaptureStatus === "recording" ? t("Stop recording") : t("Record voice")}
-            >
-              {voiceCaptureStatus === "requesting"
-                ? "Requesting microphone…"
-                : voiceCaptureStatus === "recording"
-                  ? t("Stop recording")
-                  : voiceCaptureStatus === "stopping"
-                    ? "Finishing recording…"
-                    : t("Record voice")}
-            </button>
-            <button
-              type="button"
-              className="button-secondary"
-              disabled={!recordedAudio || voiceCaptureStatus !== "idle"}
-              onClick={() => void transcribeVoiceCapture()}
-              aria-label={t("Transcribe recording")}
-            >
-              {voiceCaptureStatus === "transcribing" ? t("Transcribing…") : t("Transcribe recording")}
-            </button>
-            {recordedAudio && voiceCaptureStatus === "idle" && (
-              <span className="text-xs text-ink-500" aria-live="polite">{t("Recording ready ·")}{" "}{Math.max(1, Math.round(recordedAudio.durationMs / 1000))}s
-              </span>
-            )}
-          </div>
-          <p className="mt-2 text-xs text-ink-500">{t("Voice Mode listens continuously: VAD can barge-in on assistant speech immediately, then a finalized utterance becomes one Runtime turn. Record voice remains push-to-talk and cannot run at the same time. VAD alone never sends a message.")}</p>
-          {micTrackSettings && (
-            <p className="mt-2 text-xs text-ink-500" aria-live="polite">
-              AEC {String(micTrackSettings.echoCancellation)} · NS{" "}
-              {String(micTrackSettings.noiseSuppression)} · AGC{" "}
-              {String(micTrackSettings.autoGainControl)}
-            </p>
-          )}
-          {voiceCaptureStatus === "recording" && (
-            <p className="mt-2 text-xs text-ink-600" aria-live="polite">{t("Microphone is active. Press Stop recording when you are finished.")}</p>
-          )}
-          {voiceError && (
-            <div className="mt-2">
-              <Notice tone="error" title={t("Voice input")} message={voiceError} />
-            </div>
-          )}
-          {voiceTranscription && (
-            <div className="mt-3 rounded-md border border-cyan-100 bg-cyan-50 p-3">
-              <div className="text-xs font-semibold uppercase text-ink-500">{t("Transcript")}</div>
-              <div className="mt-1 text-sm text-ink-800">
-                {voiceTranscription.text || "(empty)"}
+        <div className="yuvi-main-composer-dock">
+          <div className="yuvi-main-composer-wrap">
+            {voiceError && (
+              <div className="yuvi-main-inline-error" role="alert">
+                {voiceError}
               </div>
-              <div className="mt-1 text-xs text-ink-500">{t("Loaded into the chat draft for review.")}</div>
-            </div>
-          )}
-        </Panel>
+            )}
 
-        <Panel title={t("Turn Options")}>
-          <div className="grid gap-3">
-            <Field label={t("Session ID")}>
-              <input
-                className="field"
-                value={sessionId}
-                onChange={(event) => setSessionId(event.target.value)}
+            <div
+              className={[
+                "yuvi-main-composer",
+                microphoneActive ? "is-listening" : "",
+                microphoneBusy ? "is-busy" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <textarea
+                ref={inputRef}
+                className="yuvi-main-composer-input"
+                placeholder={t("Message YUVI")}
+                value={input}
+                rows={1}
+                autoFocus
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  const target = event.currentTarget;
+                  target.style.height = "auto";
+                  target.style.height = `${Math.min(target.scrollHeight, 156)}px`;
+                }}
+                onKeyDown={(event) => {
+                  if (shouldSubmitChatKey(event)) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                aria-label={t("Chat message")}
               />
-            </Field>
-            <Toggle
-              label={t("Read Memory")}
-              checked={readMemory}
-              onChange={setReadMemory}
-              note={t("Controls retrieval and prompt injection.")}
-            />
-            <Toggle
-              label={t("Write Memory")}
-              checked={writeMemory}
-              onChange={setWriteMemory}
-              note={t("Controls whether this turn can create runtime memory.")}
-            />
-            <Toggle
-              label={t("TTS output")}
-              checked={voiceOutput}
-              onChange={updateVoiceOutput}
-              testId="tts-output-toggle"
-              note={t("Streams sentence segments to the companion window for synthesis and lip sync.")}
-            />
+
+              <button
+                type="button"
+                className="yuvi-main-composer-button yuvi-main-microphone"
+                disabled={
+                  memoryPreferenceState !== "ready" ||
+                  microphoneBusy ||
+                  voiceCaptureStatus !== "idle"
+                }
+                aria-pressed={microphoneActive}
+                aria-label={microphoneLabel}
+                title={microphoneLabel}
+                onClick={() =>
+                  void (microphoneActive ? stopLiveSpeech() : startLiveSpeech())
+                }
+              >
+                <MicrophoneIcon active={microphoneActive} />
+              </button>
+
+              {requestStatus === "sending" ? (
+                <button
+                  type="button"
+                  className="yuvi-main-composer-button yuvi-main-stop"
+                  onClick={stopGeneration}
+                  aria-label={t("Stop generating")}
+                  title={t("Stop generating")}
+                >
+                  <StopIcon />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="yuvi-main-composer-button yuvi-main-send"
+                  disabled={memoryPreferenceState !== "ready" || !input.trim()}
+                  onClick={() => void send()}
+                  aria-label={t("Send message")}
+                  title={t("Send message")}
+                >
+                  <SendIcon />
+                </button>
+              )}
+            </div>
+
+            {(settingsStatus || voiceStatus || playbackStatus) && (
+              <div
+                className={
+                  memoryPreferenceState === "unavailable"
+                    ? "yuvi-main-composer-status is-error"
+                    : "yuvi-main-composer-status"
+                }
+                aria-live="polite"
+              >
+                {[settingsStatus, voiceStatus, playbackStatus].filter(Boolean).join(" · ")}
+              </div>
+            )}
           </div>
-        </Panel>
-      </div>
+        </div>
+      </main>
     </div>
+  );
+}
+
+function MicrophoneIcon(props: { active: boolean }): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 15.25a3.75 3.75 0 0 0 3.75-3.75V7a3.75 3.75 0 0 0-7.5 0v4.5A3.75 3.75 0 0 0 12 15.25Zm-6-4a6 6 0 0 0 12 0M12 17.25V21M9.25 21h5.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={props.active ? 2.15 : 1.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SendIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 18V6m0 0-4.5 4.5M12 6l4.5 4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function StopIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8" y="8" width="8" height="8" rx="1.5" fill="currentColor" />
+    </svg>
   );
 }
 

@@ -87,7 +87,8 @@ vi.mock("./user-settings-client.js", () => ({
     revision: 1,
     settings: {
       proactive: { enabled: true },
-      tts: { enabled: true, mode: "external" }
+      tts: { enabled: true, mode: "external" },
+      memory: { enabled: true }
     }
   })),
   subscribeUserSettingsChanged: vi.fn((_listener: (event: unknown) => void) => () => undefined)
@@ -207,7 +208,7 @@ describe("MainPage proactive CompanionBus bridge", () => {
       expect(mockState.subscribeProactiveLive).toHaveBeenCalled();
       expect(mockState.streamProactiveTurn).not.toHaveBeenCalled();
       expect(readText(dom.container)).toContain("proactive reply");
-      expect(readText(dom.container)).toContain("assistant");
+      expect(readText(dom.container)).not.toContain("assistant");
       expect(readText(dom.container)).not.toContain("user");
       expect(readText(dom.container)).not.toContain("trace-no-op");
     } finally {
@@ -223,7 +224,8 @@ describe("MainPage proactive CompanionBus bridge", () => {
       revision: 1,
       settings: {
         proactive: { enabled: false },
-        tts: { enabled: true, mode: "external" }
+        tts: { enabled: true, mode: "external" },
+        memory: { enabled: true }
       }
     } as never);
     mockState.subscribeProactiveLive.mockImplementation(async () => undefined);
@@ -271,7 +273,11 @@ it("converges Main and Companion TTS after a WebUI settings change", async () =>
     expect(listener).toBeDefined();
     vi.mocked(fetchUserSettings).mockResolvedValueOnce({
       loadError: null, revision: 2,
-      settings: { proactive: { enabled: true }, tts: { enabled: false, mode: "external" } }
+      settings: {
+        proactive: { enabled: true },
+        tts: { enabled: false, mode: "external" },
+        memory: { enabled: true }
+      }
     } as Awaited<ReturnType<typeof fetchUserSettings>>);
     await act(async () => {
       listener?.({ revision: 2, changedSections: ["tts"] } as Parameters<NonNullable<typeof listener>>[0]);
