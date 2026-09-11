@@ -11,6 +11,7 @@ const PRODUCT_SURFACES = [
   "product-first-run-setup.tsx",
   "product-compact-health.tsx",
   "product-models-providers.tsx",
+  "product-local-services.tsx",
   "product-memory-settings.tsx",
   "product-configuration.tsx",
   "product-live2d-models.tsx",

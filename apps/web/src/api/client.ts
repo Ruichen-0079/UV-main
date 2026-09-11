@@ -1019,6 +1019,19 @@ export const apiClient = {
   getLocalServices(signal?: AbortSignal): Promise<LocalServicesStatus> {
     return request("/local-services/status", signalRequestInit(signal));
   },
+  detectLocalServices(signal?: AbortSignal): Promise<LocalConnectionDetectResponse> {
+    return request("/product/local-services/detect", signalRequestInit(signal));
+  },
+  probeLocalService(input: {
+    service: LocalConnectionService;
+    endpoint: string;
+    apiKey?: string;
+  }): Promise<LocalConnectionFinding> {
+    return request("/product/local-services/probe", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
   restartLocalServices(): Promise<{ ok: boolean }> {
     return request("/system/local-services/restart", { method: "POST" });
   },
@@ -1861,6 +1874,29 @@ export type LocalServicesStatus = {
     available?: boolean;
     message?: string;
   };
+};
+
+export type LocalConnectionService = "embedding" | "stt" | "tts";
+export type LocalConnectionState =
+  | "ready"
+  | "hibernated"
+  | "warming"
+  | "unavailable"
+  | "needs-key"
+  | "not-configured";
+export type LocalConnectionFinding = {
+  service: LocalConnectionService;
+  testedEndpoint: string;
+  source: "saved" | "default" | "explicit";
+  state: LocalConnectionState;
+  model?: string;
+  dimensions?: number;
+  voice?: string;
+  detail?: string;
+};
+export type LocalConnectionDetectResponse = {
+  checkedAt: string;
+  services: Record<LocalConnectionService, LocalConnectionFinding>;
 };
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
