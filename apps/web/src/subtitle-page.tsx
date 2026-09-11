@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeSubtitleProjection } from "./subtitle-bus.js";
 import { paginateSubtitleText, subtitlePageDurationMs } from "./subtitle-projection.js";
-import { isTauriRuntime, preloadTauriWindowApi, startWindowDragging } from "./tauri-window.js";
+import { isTauriRuntime, preloadTauriWindowApi, startWindowDragging, trackWindowDragGesture } from "./tauri-window.js";
 
 type VisiblePage = {
   messageId: string;
@@ -108,7 +108,13 @@ export function SubtitlePage(): JSX.Element {
       onPointerDown={(event) => {
         if (!isTauriRuntime() || event.button !== 0) return;
         event.preventDefault();
-        void startWindowDragging();
+        // Same XWayland-safe threshold as Companion: clicks without movement
+        // must not enter the native drag grab.
+        const startX = event.clientX;
+        const startY = event.clientY;
+        trackWindowDragGesture(startX, startY, () => {
+          void startWindowDragging();
+        });
       }}
     >
       <div

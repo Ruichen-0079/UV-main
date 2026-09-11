@@ -23,6 +23,9 @@ import {
   controlWebUIWindow,
   getSubtitlePresentationState,
   setSubtitleLocked,
+  hasExceededWindowDragThreshold,
+  trackWindowDragGesture,
+  WINDOW_DRAG_THRESHOLD_PX,
   type TauriResizeDirection
 } from "./tauri-window.js";
 
@@ -129,5 +132,59 @@ describe("startWindowResizeDragging", () => {
     (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
     await startWindowResizeDragging("SouthEast" as TauriResizeDirection);
     expect(startResizeDragging).toHaveBeenCalledWith("SouthEast");
+  });
+});
+
+describe("window drag threshold", () => {
+  it("requires movement before the native grab", () => {
+    expect(WINDOW_DRAG_THRESHOLD_PX).toBeGreaterThan(0);
+    expect(hasExceededWindowDragThreshold(0, 0, 0, 0)).toBe(false);
+    expect(hasExceededWindowDragThreshold(0, 0, 1, 1)).toBe(false);
+    expect(
+      hasExceededWindowDragThreshold(0, 0, WINDOW_DRAG_THRESHOLD_PX, 0)
+    ).toBe(true);
+    expect(hasExceededWindowDragThreshold(10, 10, 13, 14)).toBe(true);
+  });
+
+  it("starts drag only after movement, never on simple click", () => {
+    const listeners = new Map<string, Set<(event: unknown) => void>>();
+    (globalThis as { window?: unknown }).window = {
+      addEventListener: (type: string, listener: (event: unknown) => void) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(listener);
+      },
+      removeEventListener: (type: string, listener: (event: unknown) => void) => {
+        listeners.get(type)?.delete(listener);
+      }
+    };
+    try {
+      let drags = 0;
+      const cleanup = trackWindowDragGesture(100, 100, () => {
+        drags += 1;
+      });
+      // Simple click without movement: pointerup cleans up, no drag.
+      for (const listener of Array.from(listeners.get("pointerup") ?? [])) {
+        listener({});
+      }
+      expect(drags).toBe(0);
+
+      let secondDrags = 0;
+      trackWindowDragGesture(100, 100, () => {
+        secondDrags += 1;
+      });
+      // Small jitter below threshold: no drag.
+      for (const listener of Array.from(listeners.get("pointermove") ?? [])) {
+        listener({ clientX: 101, clientY: 101 });
+      }
+      expect(secondDrags).toBe(0);
+      // Real move beyond threshold: exactly one drag, then auto-cleanup.
+      for (const listener of Array.from(listeners.get("pointermove") ?? [])) {
+        listener({ clientX: 120, clientY: 100 });
+      }
+      expect(secondDrags).toBe(1);
+      cleanup();
+    } finally {
+      delete (globalThis as { window?: unknown }).window;
+    }
   });
 });

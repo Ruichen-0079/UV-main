@@ -78,6 +78,63 @@ export async function startWindowDragging(): Promise<void> {
   await getCurrentWindow().startDragging();
 }
 
+/**
+ * XWayland-safe drag initiation threshold.
+ *
+ * Calling native `startDragging` (GTK `begin_move_drag`) on every pointerdown
+ * — including simple clicks without movement — can leave the pointer grab
+ * active under XWayland, making the window appear stuck in a grab/drag state
+ * until a fullscreen transition resets it. Require a small movement before
+ * starting the native drag so clicks never grab.
+ */
+export const WINDOW_DRAG_THRESHOLD_PX = 5;
+
+export function hasExceededWindowDragThreshold(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  thresholdPx: number = WINDOW_DRAG_THRESHOLD_PX
+): boolean {
+  const dx = currentX - startX;
+  const dy = currentY - startY;
+  return dx * dx + dy * dy >= thresholdPx * thresholdPx;
+}
+
+/**
+ * Track one pointerdown gesture and start the native window drag only after
+ * the pointer moves beyond the threshold. Simple clicks (no movement) never
+ * touch the native drag grab. Returns a cleanup for unmount safety.
+ */
+export function trackWindowDragGesture(
+  startX: number,
+  startY: number,
+  onDragStart: () => void,
+  thresholdPx: number = WINDOW_DRAG_THRESHOLD_PX
+): () => void {
+  let dragged = false;
+  const cleanup = (): void => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onEnd);
+    window.removeEventListener("pointercancel", onEnd);
+  };
+  const onMove = (event: PointerEvent): void => {
+    if (dragged) return;
+    if (hasExceededWindowDragThreshold(startX, startY, event.clientX, event.clientY, thresholdPx)) {
+      dragged = true;
+      cleanup();
+      onDragStart();
+    }
+  };
+  const onEnd = (): void => {
+    cleanup();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onEnd);
+  window.addEventListener("pointercancel", onEnd);
+  return cleanup;
+}
+
 export type CompanionWindowAction =
   | "show_companion"
   | "hide_companion"

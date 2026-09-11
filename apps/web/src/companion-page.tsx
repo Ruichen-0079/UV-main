@@ -53,7 +53,8 @@ import {
   isTauriRuntime,
   preloadTauriWindowApi,
   startWindowDragging,
-  startWindowResizeDragging
+  startWindowResizeDragging,
+  trackWindowDragGesture
 } from "./tauri-window.js";
 
 /**
@@ -620,7 +621,13 @@ export function CompanionPage(): JSX.Element {
         if (!tauri || event.button !== 0) return;
         const target = event.target as HTMLElement;
         if (target.closest?.("[data-yuvi-resize-handle]")) return;
-        void startWindowDragging();
+        // Require movement before the native drag grab so simple clicks never
+        // leave an XWayland pointer grab active (fullscreen was the recovery).
+        const startX = event.clientX;
+        const startY = event.clientY;
+        trackWindowDragGesture(startX, startY, () => {
+          void startWindowDragging();
+        });
       }}
     >
       <LumiCanvas
