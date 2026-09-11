@@ -46,16 +46,21 @@ function portableSettings() {
   return settings;
 }
 
-it("Portable rejects persisted Installed STT/TTS endpoints while retaining remote providers", () => {
+it("Portable routes explicit localhost STT/TTS endpoints without claiming ownership", () => {
   const env = {YUVI_PORTABLE_VERSION: "0.1.2", LOCAL_STT_BASE_URL: "http://127.0.0.1:19876"};
   const settings = portableSettings();
   expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
+  // Routing is not ownership: an explicit external localhost endpoint is
+  // adopted for the capability while managed defaults stay untouched.
   settings.configuration.providers = [{id: "stt", displayName: "Local", adapter: "local-stt", baseUrl: "http://127.0.0.1:9876"}];
-  expect(() => productEnvironment(env, settings)).toThrow("own managed endpoint");
+  const externalStt = productEnvironment(env, settings);
+  expect(externalStt["LOCAL_STT_BASE_URL"]).toBe("http://127.0.0.1:19876");
+  expect(JSON.parse(String(externalStt["YUVI_PRODUCT_CONFIGURATION"])).providers[0].baseUrl).toBe("http://127.0.0.1:9876");
   settings.configuration.providers[0]!.baseUrl = env.LOCAL_STT_BASE_URL;
   expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
   settings.configuration.providers = [{id: "tts", displayName: "Local", adapter: "gpt-sovits", baseUrl: "http://127.0.0.1:9881"}];
-  expect(() => productEnvironment(env, settings)).toThrow("owned local TTS");
+  const externalTts = productEnvironment(env, settings);
+  expect(JSON.parse(String(externalTts["YUVI_PRODUCT_CONFIGURATION"])).providers[0].baseUrl).toBe("http://127.0.0.1:9881");
   settings.configuration.providers[0]!.baseUrl = "https://tts.example.test";
   expect(productEnvironment(env, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();
   expect(productEnvironment({}, settings)["YUVI_PRODUCT_CONFIGURATION"]).toBeTruthy();

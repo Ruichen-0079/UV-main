@@ -19,16 +19,13 @@ export function writePrivateJson(path: string, value: unknown) {
 export function defaultProductSettings(): ProductSettings { return { configuration: emptyProductConfiguration(), people: [], primaryPersonId: null, proactive: { threshold: .7, intervalMs: 60_000 }, revision: 0 }; }
 export function productEnvironment(env: Record<string, string | undefined>, settings: ProductSettings | null): Record<string, string | undefined> {
   if (!settings) return env;
-  if (env["YUVI_PORTABLE_VERSION"]) {
-    for (const provider of settings.configuration.providers) {
-      if (provider.adapter === "local-stt" && provider.baseUrl.replace(/\/$/, "") !== env["LOCAL_STT_BASE_URL"]) {
-        throw new Error("Portable local STT must use its own managed endpoint. Update the saved Product provider URL.");
-      }
-      if (["gpt-sovits", "dots-tts"].includes(provider.adapter) && ["localhost", "127.0.0.1", "[::1]"].includes(new URL(provider.baseUrl).hostname)) {
-        throw new Error("Portable does not bundle an owned local TTS service.");
-      }
-    }
-  }
+  // Provider routing is not process ownership. A Product-selected localhost
+  // endpoint (for example an externally running 9876/9881/8128 service) only
+  // selects where a capability is routed. Lifecycle ownership stays with the
+  // managed service (managed endpoint/start command/autostart), so no
+  // localhost allow/deny check belongs here. In particular the Portable
+  // managed defaults (19876/19881/19880) keep working when selected, while an
+  // explicit external Product endpoint must not be rewritten or rejected.
   const primary = settings.people.find(p => p.id === settings.primaryPersonId);
   return { ...env, YUVI_PRODUCT_CONFIGURATION: JSON.stringify(settings.configuration), MEMORY_SUBJECT_USER_ID: primary?.id, MEMORY_PERSONA_ID: primary?.personaId, PROACTIVE_SCORE_THRESHOLD: String(settings.proactive.threshold), PROACTIVE_EVALUATION_INTERVAL_MS: String(settings.proactive.intervalMs) };
 }

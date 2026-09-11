@@ -345,6 +345,50 @@ describe("DesktopSupervisor shutdown", () => {
     expect(gracefulStop).not.toHaveBeenCalledWith(41_099);
     expect(runtime.ownership).toBe("none");
   });
+
+  it("portable shutdown never stops externally routed local STT/TTS processes", async () => {
+    const cfg = baseConfig();
+    cfg.env = { ...cfg.env, YUVI_PORTABLE_VERSION: "0.1.2" };
+    const supervisor = createSupervisor(cfg);
+    const services = (
+      supervisor as unknown as {
+        services: Map<
+          string,
+          {
+            child: ReturnType<typeof fakeChild> | null;
+            ownership: "none" | "owned" | "external";
+            pid: number | null;
+          }
+        >;
+      }
+    ).services;
+    // Host-owned 9876/9881 while Product routes externally: observed only.
+    const localStt = services.get("local_stt");
+    const ttsWrapper = services.get("tts_wrapper");
+    if (!localStt || !ttsWrapper) throw new Error("expected local voice services");
+    localStt.child = null;
+    localStt.pid = 41_976;
+    localStt.ownership = "external";
+    ttsWrapper.child = null;
+    ttsWrapper.pid = 41_981;
+    ttsWrapper.ownership = "external";
+
+    const gracefulStop = vi
+      .spyOn(processWindows, "requestGracefulStop")
+      .mockImplementation(() => undefined);
+    const forceKill = vi
+      .spyOn(processWindows, "forceKillProcessTree")
+      .mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(true);
+
+    await supervisor.stopService("local_stt");
+    await supervisor.stopService("tts_wrapper");
+    await supervisor.shutdown();
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_976);
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_981);
+    expect(forceKill).not.toHaveBeenCalledWith(41_976);
+    expect(forceKill).not.toHaveBeenCalledWith(41_981);
+  });
 });
 
 describe("DesktopSupervisor exec-stable Runtime ownership", () => {
