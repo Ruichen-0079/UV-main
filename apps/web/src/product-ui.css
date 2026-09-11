@@ -2031,3 +2031,25 @@ html[data-yuvi-surface="main"] #root {
     animation: none;
   }
 }
+
+/* Keep desktop settings scrolling inside the content pane, without a sticky
+   viewport-height sidebar participating in document scrolling. */
+@media (min-width: 601px) {
+  .yuvi-product-webui {
+    height: 100vh;
+    overflow: hidden;
+  }
+  .yuvi-product-webui > .yuvi-product-sidebar {
+    position: static;
+    height: 100%;
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+  .yuvi-product-webui > .yuvi-product-content {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+}

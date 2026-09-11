@@ -3,6 +3,47 @@
  * browser /companion debug page (and any non-Tauri test environment) never
  * touches the Tauri IPC bridge.
  */
+import { withActionDeadline } from "./action-deadline.js";
+
+export async function invokeDesktop<T>(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<T> {
+  return withActionDeadline(
+    (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return args === undefined ? invoke<T>(command) : invoke<T>(command, args);
+    })()
+  );
+}
+
+/** Subscribe before the initial read; focus recovers from a missed desktop event. */
+export function subscribeSurfaceChanged(
+  refresh: () => void,
+  onError: (error: unknown) => void
+): () => void {
+  let disposed = false;
+  let unlisten: (() => void) | undefined;
+  window.addEventListener("focus", refresh);
+  void import("@tauri-apps/api/event")
+    .then(async ({ listen }) => {
+      if (disposed) return;
+      const remove = await listen("desktop-surface.changed", refresh);
+      if (disposed) remove();
+      else {
+        unlisten = remove;
+        refresh();
+      }
+    })
+    .catch((error) => {
+      if (!disposed) onError(error);
+    });
+  return () => {
+    disposed = true;
+    unlisten?.();
+    window.removeEventListener("focus", refresh);
+  };
+}
 
 /** Mirrors @tauri-apps/api/window's ResizeDirection (not exported in v2.11). */
 export type TauriResizeDirection =
@@ -45,8 +86,7 @@ export type CompanionWindowAction =
 
 export async function controlCompanionWindow(action: CompanionWindowAction): Promise<void> {
   if (!isTauriRuntime()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke(action);
+  await invokeDesktop(action);
 }
 
 export type CompanionPresentationState = {
@@ -55,18 +95,14 @@ export type CompanionPresentationState = {
 
 export async function getCompanionPresentationState(): Promise<CompanionPresentationState> {
   if (!isTauriRuntime()) return { visible: false };
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<CompanionPresentationState>("get_companion_presentation_state");
+  return invokeDesktop<CompanionPresentationState>("get_companion_presentation_state");
 }
-
 
 /** Show the existing lazy WebUI desktop surface. Settings live there, not in Main Chat. */
 export async function controlWebUIWindow(): Promise<void> {
   if (!isTauriRuntime()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("show_webui");
+  await invokeDesktop("show_webui");
 }
-
 
 export type SubtitlePresentationState = {
   visible: boolean;
@@ -75,18 +111,15 @@ export type SubtitlePresentationState = {
 
 export async function controlSubtitleWindow(action: "show" | "hide"): Promise<void> {
   if (!isTauriRuntime()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke(action === "show" ? "show_subtitle" : "hide_subtitle");
+  await invokeDesktop(action === "show" ? "show_subtitle" : "hide_subtitle");
 }
 
 export async function getSubtitlePresentationState(): Promise<SubtitlePresentationState> {
   if (!isTauriRuntime()) return { visible: false, locked: false };
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SubtitlePresentationState>("get_subtitle_presentation_state");
+  return invokeDesktop<SubtitlePresentationState>("get_subtitle_presentation_state");
 }
 
 export async function setSubtitleLocked(locked: boolean): Promise<SubtitlePresentationState> {
   if (!isTauriRuntime()) return { visible: false, locked };
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SubtitlePresentationState>("set_subtitle_locked", { locked });
+  return invokeDesktop<SubtitlePresentationState>("set_subtitle_locked", { locked });
 }

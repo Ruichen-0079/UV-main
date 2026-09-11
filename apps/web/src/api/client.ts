@@ -1,4 +1,5 @@
 import { resolveApiBaseUrl } from "../desktop-runtime.js";
+import { withActionDeadline } from "../action-deadline.js";
 import type { EmbodiedPresentationOutcomeReport } from "@companion/protocol";
 import {
   MessageSseParser,
@@ -1871,17 +1872,24 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("authorization", `Bearer ${dashboardDevToken}`);
   }
 
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...init,
-    headers
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new ApiError(text || response.statusText, response.status);
+  const controller = new AbortController();
+  const abort = () => controller.abort(init?.signal?.reason);
+  if (init?.signal?.aborted) abort();
+  init?.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    return await withActionDeadline((async () => {
+      const response = await fetch(`${apiBaseUrl()}${path}`, {
+        ...init, headers, signal: controller.signal
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(text || response.statusText, response.status);
+      }
+      return response.json() as Promise<T>;
+    })(), path.includes("/import") ? 120_000 : 60_000, () => controller.abort());
+  } finally {
+    init?.signal?.removeEventListener("abort", abort);
   }
-
-  return response.json() as Promise<T>;
 }
 
 function shouldAttachDashboardDevToken(path: string, method: string | undefined): boolean {
@@ -1993,7 +2001,13 @@ export function resolveWebSocketUrl(path: string): string {
 }
 
 export async function productSample(id: string): Promise<Blob> {
- const response = await fetch(`${apiBaseUrl()}/product/voice-samples/${encodeURIComponent(id)}`, { headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {} });
- if (!response.ok) throw new Error("Sample unavailable.");
- return response.blob();
+  const controller = new AbortController();
+  return withActionDeadline((async () => {
+    const response = await fetch(`${apiBaseUrl()}/product/voice-samples/${encodeURIComponent(id)}`, {
+      headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {},
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error("Sample unavailable.");
+    return response.blob();
+  })(), 30_000, () => controller.abort());
 }

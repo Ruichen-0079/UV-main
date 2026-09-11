@@ -4,6 +4,7 @@ import {
   controlSubtitleWindow,
   getSubtitlePresentationState,
   isTauriRuntime,
+  subscribeSurfaceChanged,
   setSubtitleLocked,
   type SubtitlePresentationState
 } from "./tauri-window.js";
@@ -20,16 +21,24 @@ export function SubtitleAppearanceSettings(): JSX.Element | null {
     const refresh = async (): Promise<void> => {
       try {
         const next = await getSubtitlePresentationState();
-        if (!cancelled) setState(next);
+        if (!cancelled)
+          setState((current) =>
+            current.visible === next.visible && current.locked === next.locked ? current : next
+          );
       } catch (error) {
         if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
       }
     };
     void refresh();
-    const poll = window.setInterval(() => void refresh(), 1000);
+    const stopSurface = subscribeSurfaceChanged(
+      () => void refresh(),
+      (error) => {
+        if (!cancelled) setNotice(String(error));
+      }
+    );
     return () => {
       cancelled = true;
-      window.clearInterval(poll);
+      stopSurface();
     };
   }, [tauri]);
 
@@ -58,7 +67,11 @@ export function SubtitleAppearanceSettings(): JSX.Element | null {
     try {
       const next = await setSubtitleLocked(!state.locked);
       setState(next);
-      setNotice(next.locked ? t("Subtitle locked: clicks pass through.") : t("Subtitle unlocked: drag it to reposition."));
+      setNotice(
+        next.locked
+          ? t("Subtitle locked: clicks pass through.")
+          : t("Subtitle unlocked: drag it to reposition.")
+      );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -71,7 +84,9 @@ export function SubtitleAppearanceSettings(): JSX.Element | null {
       <div>
         <h2 className="m-0 text-lg font-semibold">{t("Subtitle window")}</h2>
         <p className="mb-0 mt-1 text-sm text-[var(--yuvi-muted)]">
-          {t("Transparent text stays above other windows. Unlock to drag it, then lock for click-through.")}
+          {t(
+            "Transparent text stays above other windows. Unlock to drag it, then lock for click-through."
+          )}
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -102,7 +117,11 @@ export function SubtitleAppearanceSettings(): JSX.Element | null {
         </button>
       </div>
       <div className="text-xs text-[var(--yuvi-muted)]" role="status">
-        {t("Subtitle status: {0} · {1}", state.visible ? t("visible") : t("hidden"), state.locked ? t("locked") : t("unlocked"))}
+        {t(
+          "Subtitle status: {0} · {1}",
+          state.visible ? t("visible") : t("hidden"),
+          state.locked ? t("locked") : t("unlocked")
+        )}
         {notice ? ` · ${notice}` : ""}
       </div>
     </section>

@@ -4,6 +4,7 @@ import {
   controlCompanionWindow,
   getCompanionPresentationState,
   isTauriRuntime,
+  subscribeSurfaceChanged,
   type CompanionPresentationState
 } from "./tauri-window.js";
 import { fetchUserSettings, saveUserSettings } from "./user-settings-client.js";
@@ -75,7 +76,8 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
     const refreshSurface = async (): Promise<void> => {
       try {
         const next = await getCompanionPresentationState();
-        if (!cancelled) setSurface(next);
+        if (!cancelled)
+          setSurface((current) => (current.visible === next.visible ? current : next));
       } catch (error) {
         if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
       }
@@ -83,23 +85,35 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
 
     const channel = new CompanionPresentationProjectionChannel();
     const unsubscribe = channel.subscribeState((next) => {
-      if (!cancelled) setRenderer(next);
+      if (!cancelled)
+        setRenderer((current) =>
+          current?.status === next.status &&
+          current.activeModelId === next.activeModelId &&
+          current.activeModelName === next.activeModelName
+            ? current
+            : next
+        );
     });
     channel.requestState();
     void refreshSurface();
 
-    const poll = window.setInterval(() => void refreshSurface(), 1000);
+    const stopSurface = subscribeSurfaceChanged(
+      () => void refreshSurface(),
+      (error) => {
+        if (!cancelled) setNotice(String(error));
+      }
+    );
     const rendererDeadline = window.setTimeout(() => {
       if (!cancelled) {
-        setRenderer((current) =>
-          current ?? { status: "failed", activeModelId: null, activeModelName: null }
+        setRenderer(
+          (current) => current ?? { status: "failed", activeModelId: null, activeModelName: null }
         );
       }
     }, 1500);
 
     return () => {
       cancelled = true;
-      window.clearInterval(poll);
+      stopSurface();
       window.clearTimeout(rendererDeadline);
       unsubscribe();
       channel.close();
@@ -116,7 +130,9 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
       setAlwaysOnTop(result.settings.companion.alwaysOnTop);
       setNotice(t("Companion window setting saved."));
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : t("Unable to save Companion window setting."));
+      setNotice(
+        error instanceof Error ? error.message : t("Unable to save Companion window setting.")
+      );
     } finally {
       setSaving(false);
     }
@@ -169,9 +185,7 @@ export function CompanionAppearanceSettings(): JSX.Element | null {
       </div>
 
       <div className="grid gap-1 text-xs text-[var(--yuvi-muted)]" role="status">
-        <span>
-          {t("Companion status: {0}", surface.visible ? t("visible") : t("hidden"))}
-        </span>
+        <span>{t("Companion status: {0}", surface.visible ? t("visible") : t("hidden"))}</span>
         <span>{t("Current model: {0}", modelLabel)}</span>
         <span>{t("Live2D renderer: {0}", rendererLabel)}</span>
       </div>

@@ -85,7 +85,7 @@ describe("Vision web input contract", () => {
     ).rejects.toThrow("20 MiB");
   });
 
-  it("passes the exact AbortSignal to fetch without serializing it", async () => {
+  it("passes cancellation to fetch without serializing the signal", async () => {
     const signal = new AbortController().signal;
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -104,7 +104,8 @@ describe("Vision web input contract", () => {
     });
 
     const init = fetchMock.mock.calls[0]?.[1];
-    expect(init?.signal).toBe(signal);
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.signal?.aborted).toBe(false);
     expect(JSON.parse(String(init?.body))).toEqual({
       imageBase64: "AQID",
       mimeType: "image/jpeg",

@@ -1,3 +1,4 @@
+mod archive_drop;
 mod config;
 mod desktop_surface;
 mod durable_memory_boot;
@@ -92,7 +93,7 @@ mod signal_exit {
   }
 }
 
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 use crate::desktop_surface::{DesktopSurfaceManager, SurfaceCommand, SurfaceId};
 
@@ -203,6 +204,7 @@ pub fn run() {
 
   tauri::Builder::default()
     .manage(supervisor::SupervisorState::default())
+    .manage(archive_drop::ArchiveDrop::default())
     .setup(move |app| {
       // Config must load even when Runtime/Supervisor are unavailable.
       let config_service = config::init_config_service(&app.handle())
@@ -264,6 +266,7 @@ pub fn run() {
       Ok(())
     })
     .on_window_event(|window, event| {
+      archive_drop::record(window, event);
       if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
         DesktopSurfaceManager::persist_companion_geometry(window);
         DesktopSurfaceManager::persist_subtitle_position(window);
@@ -280,12 +283,14 @@ pub fn run() {
                 window.label()
               );
             }
+            let _ = window.app_handle().emit("desktop-surface.changed", ());
           }
           lifecycle::WindowCloseAction::AllowClose => {}
         }
       }
     })
     .invoke_handler(tauri::generate_handler![
+      archive_drop::read_dropped_archive,
       show_companion,
       hide_companion,
       toggle_companion,

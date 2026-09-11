@@ -32,6 +32,7 @@ export function ProductWebUI(): JSX.Element {
   );
   useEffect(() => {
     window.scrollTo?.(0, 0);
+    if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [view]);
   const navigate = (next: ProductView) => setView(next);
   if (view === "developer")

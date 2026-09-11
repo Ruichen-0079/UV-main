@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Window};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Window};
 
 use crate::config;
 
@@ -306,7 +306,6 @@ fn build_webui_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewUrl::App(SurfaceId::WebUI.window_url().into()),
   )
   .title(SurfaceId::WebUI.window_title())
-  .disable_drag_drop_handler()
   .inner_size(1280.0, 820.0)
   .min_inner_size(800.0, 600.0)
   .resizable(true)
@@ -415,11 +414,13 @@ impl DesktopSurfaceManager {
     surface: SurfaceId,
     command: SurfaceCommand,
   ) -> Result<(), String> {
-    match command {
+    let result = match command {
       SurfaceCommand::Show => Self::show(app, surface),
       SurfaceCommand::Hide => Self::hide(app, surface),
       SurfaceCommand::Toggle => Self::toggle(app, surface),
-    }
+    };
+    let _ = app.emit("desktop-surface.changed", ());
+    result
   }
 
   /// Persist only Companion presentation geometry. Runtime/User settings remain
@@ -515,7 +516,9 @@ impl DesktopSurfaceManager {
           .map_err(|error| error.to_string())?;
       }
     }
-    Self::subtitle_presentation_state(app)
+    let result = Self::subtitle_presentation_state(app);
+    let _ = app.emit("desktop-surface.changed", ());
+    result
   }
 
   /// Apply the configured Companion always-on-top presentation to the live

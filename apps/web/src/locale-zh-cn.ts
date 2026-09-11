@@ -78,6 +78,8 @@ export const zhCN: Readonly<Record<string, string>> = {
   "Secret updated. Applying changes to: {0}.": "密钥已更新。正在应用到：{0}。",
   "Settings saved. Services may reload: {0}.": "设置已保存。以下服务可能重新加载：{0}。",
   "API key (optional; blank untouched retains saved key)": "API 密钥（可选；留空会保留已保存的密钥）",
+  "Request timed out. The operation may still be completing; refresh its status before retrying.": "请求等待超时。操作可能仍在完成，请刷新状态后再重试。",
+  "Action completed, but refreshing state failed: {0}": "操作已完成，但刷新失败：{0}",
   "Action failed.": "操作失败。",
   "Adapter": "适配器",
   "Add compatible model": "添加兼容模型",
