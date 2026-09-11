@@ -22,6 +22,22 @@ describe("PromptBuilder", () => {
     expect(output.prompt).toContain("<RelevantMemory>");
   });
 
+  it("does not emit legacy CharacterStyle into provider-facing prompts", () => {
+    const output = new PromptBuilder().buildPrompt({
+      systemIdentity: "You are YUVI.",
+      characterStyle:
+        "Warm, concise, conversational, and practical. Prefer short replies of about 1-3 sentences.",
+      relationshipContext: "Use only supplied relationship evidence.",
+      userMessage: "Hello"
+    });
+
+    expect(output.sections.map((section) => section.name)).not.toContain("CharacterStyle");
+    expect(output.prompt).not.toContain("Warm, concise, conversational, and practical");
+    expect(output.messages[0]?.content).not.toContain(
+      "Warm, concise, conversational, and practical"
+    );
+  });
+
   it("includes current time context for temporal reasoning", () => {
     const output = new PromptBuilder().buildPrompt({
       systemIdentity: "You are Companion.",
@@ -83,7 +99,6 @@ describe("PromptBuilder", () => {
 
     expect(first.sections.map((section) => section.name)).toEqual([
       "SystemIdentity",
-      "CharacterStyle",
       "ProactiveInstruction",
       "RelationshipContext",
       "DirectContext",
@@ -91,12 +106,13 @@ describe("PromptBuilder", () => {
     ]);
     expect(
       first.sections.filter((section) => section.stable).map((section) => section.name)
-    ).toEqual(["SystemIdentity", "CharacterStyle", "ProactiveInstruction", "RelationshipContext"]);
-    expect(first.sections.slice(0, 4).map((section) => section.content)).toEqual(
-      second.sections.slice(0, 4).map((section) => section.content)
+    ).toEqual(["SystemIdentity", "ProactiveInstruction", "RelationshipContext"]);
+    expect(first.sections.slice(0, 3).map((section) => section.content)).toEqual(
+      second.sections.slice(0, 3).map((section) => section.content)
     );
     expect(first.prompt).toContain("The reading order is still unresolved.");
     expect(first.prompt).toContain("The user is planning a reading project.");
+    expect(first.prompt).not.toContain("<CharacterStyle>");
     expect(first.prompt).not.toContain("<CurrentTime>");
     expect(first.prompt).not.toContain("<CurrentAffect>");
     expect(first.prompt).not.toContain("<RecentEpisodicMemory>");
@@ -118,7 +134,6 @@ describe("PromptBuilder", () => {
 
     expect(output.sections.map((section) => section.name)).toEqual([
       "SystemIdentity",
-      "CharacterStyle",
       "RelationshipContext",
       "CurrentTime",
       "CurrentAffect",
@@ -131,6 +146,7 @@ describe("PromptBuilder", () => {
     ]);
     expect(output.messages.map((message) => message.role)).toEqual(["system", "user"]);
     expect(output.messages[1]?.content).toContain("Continue the topic.");
+    expect(output.prompt).not.toContain("<CharacterStyle>");
     expect(output.prompt).not.toContain("<ProactiveInstruction>");
   });
 
