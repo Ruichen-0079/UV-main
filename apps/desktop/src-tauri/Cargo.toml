@@ -22,6 +22,7 @@ tempfile = "3"
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0.2", features = ["v2_38"] }
 keyring = { version = "3", default-features = false, features = ["sync-secret-service"] }
 
 [target.'cfg(unix)'.dependencies]

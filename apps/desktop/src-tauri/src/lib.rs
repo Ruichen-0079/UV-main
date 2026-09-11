@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod webview_media;
 mod archive_drop;
 mod config;
 mod desktop_surface;

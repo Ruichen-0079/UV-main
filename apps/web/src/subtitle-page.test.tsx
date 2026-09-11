@@ -1,3 +1,4 @@
+import { controlSubtitleWindow } from "./tauri-window.js";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SubtitlePage } from "./subtitle-page.js";
@@ -11,6 +12,12 @@ import {
   paginateSubtitleText,
   projectCommittedAssistantText
 } from "./subtitle-projection.js";
+
+
+vi.mock("./tauri-window.js", async importOriginal => ({
+  ...await importOriginal<typeof import("./tauri-window.js")>(),
+  controlSubtitleWindow: vi.fn(async () => undefined)
+}));
 
 describe("SubtitlePage", () => {
   it("renders the subtitle surface shell without chat or Memory chrome", () => {
@@ -80,4 +87,16 @@ describe("SubtitlePage", () => {
 
     expect(projectCommittedAssistantText(source)).toBe(source);
   });
+});
+
+it("replays committed text when the lazy subtitle surface subscribes after publication", async () => {
+  publishSubtitleProjection({ kind: "committed-assistant-text", messageId: "lazy-first", text: "Visible without TTS." });
+  expect(controlSubtitleWindow).toHaveBeenCalledWith("show");
+  const seen: unknown[] = [];
+  const unsubscribe = subscribeSubtitleProjection(message => seen.push(message));
+  try {
+    await vi.waitFor(() => expect(seen).toEqual([
+      { kind: "committed-assistant-text", messageId: "lazy-first", text: "Visible without TTS." }
+    ]));
+  } finally { unsubscribe(); }
 });

@@ -1669,6 +1669,12 @@ async function streamTextResponse(
         break;
       }
       for (const event of parser.push(result.value)) {
+        // Installed only by the opt-in desktop metadata trace.
+        (globalThis as typeof globalThis & {
+          __yuviUxTrace?: (phase: string, detail: Record<string, unknown>) => void;
+        }).__yuviUxTrace?.("stream-dispatch", {
+          type: event.type, length: event.type === "text-delta" ? event.text.length : 0
+        });
         if (event.type === "text-delta") {
           if (completed) {
             throw new MessageStreamProtocolError("The message stream continued after completion.");

@@ -388,7 +388,8 @@ impl DesktopSurfaceManager {
     app: &AppHandle,
     surface: SurfaceId,
   ) -> tauri::Result<tauri::WebviewWindow> {
-    match surface {
+    let existing = app.get_webview_window(surface.window_label()).is_some();
+    let window = match surface {
       SurfaceId::Main => existing_or_create(
         app.get_webview_window(SurfaceId::Main.window_label()),
         || build_main_window(app),
@@ -405,7 +406,12 @@ impl DesktopSurfaceManager {
         app.get_webview_window(SurfaceId::Subtitle.window_label()),
         || build_subtitle_window(app),
       ),
-    }
+    }?;
+    #[cfg(target_os = "linux")]
+    if !existing { crate::webview_media::configure(&window)?; }
+    #[cfg(not(target_os = "linux"))]
+    let _ = existing;
+    Ok(window)
   }
 
   /// Dispatch one presentation command onto one existing surface.

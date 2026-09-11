@@ -40,6 +40,7 @@ vi.mock("./api/client.js", () => ({
   ApiError: class ApiError extends Error {},
   apiClient: {
     streamMessage: vi.fn(),
+    admitSpeechPlayback: vi.fn(async () => ({ effectId: "effect-test" })),
     streamProactiveTurn: mockState.streamProactiveTurn,
     subscribeProactiveLive: mockState.subscribeProactiveLive,
     setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true })),
@@ -285,6 +286,55 @@ it("converges Main and Companion TTS after a WebUI settings change", async () =>
     expect(mockState.buses[0]?.posted).toContainEqual({
       kind: "tts-config", config: { enabled: false, mode: "external" }
     });
+  } finally {
+    await act(async () => root?.unmount());
+    dom.restore();
+  }
+});
+
+it("renders at least two intermediate assistant states before completed", async () => {
+  const { apiClient } = await import("./api/client.js");
+  mockState.subscribeProactiveLive.mockResolvedValue(undefined);
+  let options!: Parameters<typeof apiClient.streamMessage>[1];
+  let finish!: (value: Awaited<ReturnType<typeof apiClient.streamMessage>>) => void;
+  vi.mocked(apiClient.streamMessage).mockImplementation((_input, incoming) => {
+    options = incoming;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const dom = installFakeDom();
+  let root!: Root;
+  const nodes = (node: import("./test-dom.js").FakeNode): import("./test-dom.js").FakeNode[] =>
+    [node, ...node.childNodes.flatMap(nodes)];
+  const props = (node: import("./test-dom.js").FakeNode): any =>
+    (node as any)[Object.keys(node).find(key => key.startsWith("__reactProps$"))!];
+  try {
+    await act(async () => {
+      root = createRoot(dom.container as unknown as Element);
+      root.render(createElement((await import("./main-page.js")).MainPage));
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.tagName === "TEXTAREA")!).onChange({
+        target: { value: "tell a story", style: {}, scrollHeight: 30 },
+        currentTarget: { style: {}, scrollHeight: 30 }
+      });
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.attributes["aria-label"] === "Send message")!).onClick();
+    });
+    const base = { traceId: "trace-stream-render", provider: "test", language: "en" };
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: "First visible" } as never));
+    expect(readText(dom.container)).toContain("First visible");
+    expect(readText(dom.container)).not.toContain("second visible");
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: ", second visible" } as never));
+    expect(readText(dom.container)).toContain("First visible, second visible");
+    expect(nodes(dom.container).some(node => node.attributes["aria-label"] === "Stop generating")).toBe(true);
+    await act(async () => {
+      const completed = { ...base, type: "completed" as const, content: "First visible, second visible" };
+      options?.onEvent?.(completed as never);
+      finish(completed as never);
+    });
+    expect(readText(dom.container)).toContain("First visible, second visible");
+    expect(nodes(dom.container).some(node => node.attributes["aria-label"] === "Stop generating")).toBe(false);
   } finally {
     await act(async () => root?.unmount());
     dom.restore();

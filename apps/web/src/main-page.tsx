@@ -1613,8 +1613,10 @@ function friendlyAudioError(error: unknown): string {
   if (error instanceof ApiError) return error.message || "语音转写请求失败。";
   if (error instanceof Error) {
     if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-      return "麦克风权限被拒绝，请在桌面应用设置中允许麦克风访问。";
+      return "麦克风访问被拒绝。请重新点击麦克风并允许访问；若桌面版没有权限提示，请重启更新后的 YUVI。";
     }
+    if (error.name === "NotFoundError") return "未找到麦克风。请连接麦克风，并在系统声音设置中选择输入设备后重试。";
+    if (error.name === "NotReadableError") return "无法打开麦克风。请在系统声音设置中检查输入设备，并关闭占用它的应用后重试。";
     if (error.message) return error.message;
   }
   return "语音录音或转写失败，请检查麦克风权限和本地语音服务。";
