@@ -50,6 +50,7 @@ export type ToolContext = {
 
 type PromptBuildSharedInput = {
   systemIdentity: string;
+  /** @deprecated Persona/style is P8-owned. Retained only as an input compatibility field. */
   characterStyle?: string;
   relationshipContext?: string;
   retrievedMemories?: Array<string | RetrievedMemoryForPrompt>;
@@ -116,7 +117,11 @@ export class PromptBuilder {
   buildPrompt(input: PromptBuildInput): PromptBuildOutput {
     const maxCharacters = input.maxCharacters ?? defaultMaxCharacters;
     const sections = this.createSections(input);
-    const budgetedSections = this.enforceBudget(sections, maxCharacters);
+    // P8/Character owns production persona semantics. CharacterStyle remains
+    // accepted only so older callers do not become an accidental second
+    // authority while they are being retired.
+    const providerFacingSections = sections.filter((section) => section.name !== "CharacterStyle");
+    const budgetedSections = this.enforceBudget(providerFacingSections, maxCharacters);
     const prompt = budgetedSections.map(formatSection).join("\n\n");
     const systemPrompt = budgetedSections
       .filter((section) => section.name !== "UserMessage")
@@ -147,14 +152,13 @@ export class PromptBuilder {
       prompt,
       characterCount: prompt.length,
       estimatedTokens: estimateTokens(prompt),
-      truncated: sectionsToText(sections).length > prompt.length
+      truncated: sectionsToText(providerFacingSections).length > prompt.length
     };
   }
 
   build(input: PromptInput): BuiltPrompt {
     const output = this.buildPrompt({
       systemIdentity: `You are ${input.companionName}, a local-first AI companion runtime agent.`,
-      characterStyle: "Respond warmly, clearly, and concisely.",
       relationshipContext: "Use remembered context only when it is relevant and helpful.",
       retrievedMemories: input.memories,
       currentSituation: "The user is actively interacting with the companion runtime.",
@@ -178,7 +182,7 @@ export class PromptBuilder {
       },
       {
         name: "CharacterStyle",
-        content: input.characterStyle ?? "Be helpful, grounded, and emotionally aware.",
+        content: input.characterStyle ?? "",
         priority: 90,
         stable: true
       },
