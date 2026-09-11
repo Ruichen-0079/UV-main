@@ -340,3 +340,49 @@ it("renders at least two intermediate assistant states before completed", async 
     dom.restore();
   }
 });
+
+it("renders a single-delta Character response verbatim without artificial chunking", async () => {
+  const { apiClient } = await import("./api/client.js");
+  mockState.subscribeProactiveLive.mockResolvedValue(undefined);
+  let options!: Parameters<typeof apiClient.streamMessage>[1];
+  let finish!: (value: Awaited<ReturnType<typeof apiClient.streamMessage>>) => void;
+  vi.mocked(apiClient.streamMessage).mockImplementation((_input, incoming) => {
+    options = incoming;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const dom = installFakeDom();
+  let root!: Root;
+  const nodes = (node: import("./test-dom.js").FakeNode): import("./test-dom.js").FakeNode[] =>
+    [node, ...node.childNodes.flatMap(nodes)];
+  const props = (node: import("./test-dom.js").FakeNode): any =>
+    (node as any)[Object.keys(node).find(key => key.startsWith("__reactProps$"))!];
+  try {
+    await act(async () => {
+      root = createRoot(dom.container as unknown as Element);
+      root.render(createElement((await import("./main-page.js")).MainPage));
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.tagName === "TEXTAREA")!).onChange({
+        target: { value: "single reply", style: {}, scrollHeight: 30 },
+        currentTarget: { style: {}, scrollHeight: 30 }
+      });
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.attributes["aria-label"] === "Send message")!).onClick();
+    });
+    const base = { traceId: "trace-single-delta", provider: "test", language: "en" };
+    const single = "Complete Character answer in one delta.";
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: single } as never));
+    // Frontend must dispatch exactly what it receives: no split, no merge.
+    expect(readText(dom.container)).toContain(single);
+    await act(async () => {
+      const completed = { ...base, type: "completed" as const, content: single };
+      options?.onEvent?.(completed as never);
+      finish(completed as never);
+    });
+    expect(readText(dom.container)).toContain(single);
+  } finally {
+    await act(async () => root?.unmount());
+    dom.restore();
+  }
+});

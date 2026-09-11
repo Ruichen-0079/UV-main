@@ -1,7 +1,7 @@
 //! Linux WebKitGTK policy for the app's existing Web capture and playback paths.
 use tauri::WebviewWindow;
 use webkit2gtk::{glib::Cast, PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
-  UserMediaPermissionRequestExt, WebViewExt, LoadEvent};
+  UserMediaPermissionRequestExt, WebViewExt};
 
 fn permits_microphone(label: &str, uri: &str, audio: bool, video: bool) -> bool {
   let Ok(url) = url::Url::parse(uri) else { return false };
@@ -12,26 +12,16 @@ fn permits_microphone(label: &str, uri: &str, audio: bool, video: bool) -> bool 
 
 pub(crate) fn configure(window: &WebviewWindow) -> tauri::Result<()> {
   let label = window.label().to_owned();
-  let diagnostics = std::env::var("YUVI_DESKTOP_UX_TRACE").as_deref() == Ok("1");
   window.with_webview(move |native| {
     let view = native.inner();
     if let Some(settings) = view.settings() {
       settings.set_enable_media_stream(true);
-      if diagnostics { settings.set_enable_write_console_messages_to_stdout(true); }
       // Main's click reaches Companion over the bus, which cannot transfer
       // browser user activation. Product/Runtime still admit speech; this
       // only lets that admitted audio play in its owning desktop surface.
       if label == "companion" {
         settings.set_media_playback_requires_user_gesture(false);
       }
-    }
-    if diagnostics {
-      view.connect_load_changed(|view, event| {
-        if event == LoadEvent::Finished {
-          #[allow(deprecated)]
-          view.run_javascript(include_str!("webview-diagnostics.js"), None::<&webkit2gtk::gio::Cancellable>, |_| {});
-        }
-      });
     }
     view.connect_permission_request(move |view, request| {
       let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() else {

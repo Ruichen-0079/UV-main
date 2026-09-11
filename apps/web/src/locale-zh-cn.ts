@@ -1,4 +1,7 @@
 export const zhCN: Readonly<Record<string, string>> = {
+  "Read replies aloud": "朗读回复",
+  "Uses the speech synthesis connection in AI & connections. Subtitles also appear when speech is off.": "使用“AI 与连接”中的语音合成服务。关闭语音时仍显示字幕。",
+
   "Speech synthesis": "语音合成",
   "Service type": "服务类型",
   "OpenAI-compatible API": "OpenAI 兼容 API",

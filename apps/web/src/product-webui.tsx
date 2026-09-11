@@ -166,7 +166,7 @@ export function ProductWebUI(): JSX.Element {
           {view === "people" && <ProductConfigurationPanel sections={["people", "voices"]} />}
           {view === "behavior" && (
             <>
-              {tauri && <UserSettingsPanel sections={["proactive"]} />}
+              {tauri && <UserSettingsPanel sections={["speech", "proactive"]} />}
               <ProductConfigurationPanel sections={["proactive"]} />
             </>
           )}

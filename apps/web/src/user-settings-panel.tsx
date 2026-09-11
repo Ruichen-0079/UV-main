@@ -44,7 +44,7 @@ function localizeUserSettingsSaveMessage(message: string): string {
 }
 
 export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
-  sections?: readonly ("memory" | "desktop" | "proactive")[];
+  sections?: readonly ("memory" | "desktop" | "proactive" | "speech")[];
   onTtsSettings?: (settings: TtsSettingsProjection, revision: number) => void;
 }): JSX.Element | null {
   const [state, dispatch] = useReducer(reduceUserSettings, undefined, initialUserSettingsUiState);
@@ -125,8 +125,8 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
             ? "Memory"
             : props.sections[0] === "proactive"
               ? "Proactive messages"
-              : "Desktop"
-          : "Desktop & User Settings"
+              : props.sections[0] === "speech" ? "Speech output" : "Desktop"
+          : props.sections?.includes("speech") ? "Conversation" : "Desktop & User Settings"
       )}
       actions={
         <div className="flex items-center gap-2">
@@ -167,6 +167,18 @@ export const UserSettingsPanel = memo(function UserSettingsPanel(props: {
       <div className="settings-grid">
         {!props.sections && (
           <p>{t("Providers, models, and voice routes are configured in Product configuration.")}</p>
+        )}
+
+        {(!props.sections || props.sections.includes("speech")) && (
+          <section className="settings-card">
+            <h3>{t("Speech output")}</h3>
+            <label className="setting-checkbox">
+              <input type="checkbox" checked={form.ttsEnabled}
+                onChange={(event) => setField("ttsEnabled", event.target.checked)} />
+              {t("Read replies aloud")}
+            </label>
+            <p>{t("Uses the speech synthesis connection in AI & connections. Subtitles also appear when speech is off.")}</p>
+          </section>
         )}
 
         {(!props.sections || props.sections.includes("memory")) && (

@@ -91,7 +91,6 @@ try {
     const supervisor = spawn(node, [path.join(root, 'supervisor', 'yuvi-desktop-supervisor.cjs'), '--mode', 'packaged', '--resource-root', root, '--state-root', dirs.data, '--runtime-manifest', path.join(root, 'runtime', 'runtime-manifest.json')], { cwd: state, env, stdio: 'inherit' });
     expectedSupervisorPid = supervisor.pid;
     const desktopEnv = { ...env, YUVI_DESKTOP_SUPERVISOR_BINDING: 'attach' };
-    if (process.env.YUVI_DESKTOP_UX_TRACE === '1') desktopEnv.YUVI_DESKTOP_UX_TRACE = '1';
     if (!process.env.GDK_BACKEND && guiSessionEnv.WAYLAND_DISPLAY && guiSessionEnv.DISPLAY) {
       desktopEnv.GDK_BACKEND = 'x11';
     } else if (process.env.GDK_BACKEND) {
