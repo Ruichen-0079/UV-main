@@ -2,6 +2,7 @@
 """YUVI Mem0 Windows x64 onedir spec."""
 
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
@@ -83,6 +84,15 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
+if sys.platform.startswith("linux"):
+    # The Debian 12 target ships a compatible libstdc++ (the collected
+    # closure needs at most GLIBCXX 3.4.30). Never bundle the build host's
+    # newer copy: the Linux ABI audit caps shipped natives at glibc 2.36.
+    a.binaries = [
+        entry
+        for entry in a.binaries
+        if not os.path.basename(entry[0]).startswith("libstdc++.so")
+    ]
 exe = EXE(
     pyz,
     a.scripts,
