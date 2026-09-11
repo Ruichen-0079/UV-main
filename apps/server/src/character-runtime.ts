@@ -111,7 +111,7 @@ const CHARACTER_GENERATION_INSTRUCTION = `You are YUVI's Character layer. Use th
 {"disposition":"SILENCE"}
 {"disposition":"TERMINATE"}
 {"disposition":"NEED_COGNITION","focus":"..."}
-NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields except the optional proactive proposal described below.`;
+NEED_COGNITION means only that stronger reasoning is needed. It does not select a provider, model, tool, capability, or Runtime action. Do not include any other fields except the optional proactive proposal described below. When the current turn continues or authorizes an unresolved concrete user request from recent conversation, fulfill that request in this response. Do not merely announce, promise, or describe future completion when the work can be completed now.`;
 
 const PROACTIVE_INSTRUCTION = `Every disposition may optionally include proactive: {"action":"KEEP"}, {"action":"CLEAR"}, {"action":"DEFER","horizon":"SHORT|NORMAL|LONG"}, or {"action":"SUPPRESS","scope":{"kind":"UNTIL","duration":"PT30M"}}. UNTIL may use an absolute ISO-8601 time instead of duration. Other scopes are {"kind":"UNTIL_ENGAGEMENT"} and {"kind":"UNTIL_EXPLICIT_RESUME"}. Interpret the user's request for quiet or resume here. KEEP preserves existing policy; CLEAR requests resumption; DEFER requests a bounded delay; SUPPRESS requests quiet with the stated scope. These are proposals: Runtime validates, authorizes and persists them. Never infer quiet countdowns from a mere silent reply. Omission means KEEP.`;
 

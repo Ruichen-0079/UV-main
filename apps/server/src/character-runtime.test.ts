@@ -436,3 +436,157 @@ describe("semantic current-screen grounding", () => {
     );
   });
 });
+
+const TASK_CONTINUATION_PROBE = "fulfill that request in this response";
+const TASK_CONTINUATION_QUALIFIER = "when the work can be completed now";
+const META_PROMISE_PATTERN = /i'll (start|begin|choose)|give me a moment|what topic|which (style|topic)/i;
+
+function sentenceCount(text: string): number {
+  return text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length;
+}
+
+/**
+ * Scripted instruction-following stand-in for the model: it fulfills only
+ * when the contract carries both the task-continuation invariant and the
+ * unresolved request itself. Otherwise it emits the exact meta-promise
+ * failure mode the invariant exists to prevent, so these tests genuinely
+ * distinguish fulfillment from announcement.
+ */
+function continuationModel(options: { requestMarker: string; fulfillment?: string }) {
+  const systems: string[] = [];
+  return {
+    systems,
+    generateChat: async (chat: ChatInput): Promise<ChatOutput> => {
+      const system = chat.messages[0]?.content ?? "";
+      systems.push(system);
+      const follows =
+        system.includes(TASK_CONTINUATION_PROBE) && system.includes(options.requestMarker);
+      const text = follows ? (options.fulfillment ?? "") : "I'll start writing now.";
+      return output(JSON.stringify({ disposition: "RESPOND", text }));
+    }
+  };
+}
+
+const HARBOR_ARTICLE = [
+  "The harbor festival begins at dawn, when fishing boats return with lanterns still burning at their sterns.",
+  "Salt spray hangs over the pier as vendors roll up striped awnings and arrange the morning catch on crushed ice.",
+  "Children press against the railings to watch crabs scramble in shallow tanks, shrieking whenever a claw snaps.",
+  "By midday the brass band claims the bandstand, and tubas compete cheerfully with gulls for the town's attention.",
+  "The lighthouse opens its narrow stair to visitors once a year, and the queue winds past the chandlery before nine.",
+  "Old sailors tell believable lies about storms in the beer tent, while newcomers pretend they can tell which parts are true.",
+  "Rope-makers demonstrate knots their grandfathers taught them, fingers moving faster than the eye wants to follow.",
+  "At dusk the committee lights the bonfire on the shingle, and the whole beach smells of woodsmoke and fried dough.",
+  "Fireworks rise over the breakwater at ten, paid for by the cannery, applauded by everyone including the cannery cat.",
+  "Couples walk the sea wall with paper cups of cocoa, arguing gently about which burst was the finest of the night.",
+  "When the tide turns after midnight, volunteers rake the sand clean, finding lost scarves, one shoe, and three kites.",
+  "The festival ends as it began, with boats slipping out past the lighthouse, lanterns lit, heading for dark water."
+].join(" ");
+
+const HARBOR_ANNOUNCEMENT =
+  "The harbor festival opens Saturday at dawn with the lantern flotilla. " +
+  "The brass band plays the bandstand at noon, and fireworks close the night at ten. " +
+  "All harbor residents are welcome; bring a lantern if you have one.";
+
+describe("Character task-continuation invariant", () => {
+  it("fulfills a delegated choice instead of announcing it (Case A)", async () => {
+    const model = continuationModel({
+      requestMarker: "500-word article",
+      fulfillment: HARBOR_ARTICLE
+    });
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      semanticSections: [
+        {
+          kind: "RECENT_CONVERSATION",
+          state: "KNOWN",
+          summary:
+            "User asked for a roughly 500-word article. Assistant asked which topic and style. User replied: You choose."
+        }
+      ],
+      userMessage: "You choose.",
+      generateChat: model.generateChat
+    });
+    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
+    expect(model.systems[0]).toContain("500-word article");
+    const reply = result.decision.reply;
+    expect(reply.disposition).toBe("RESPOND");
+    if (reply.disposition !== "RESPOND") return;
+    expect(reply.text.length).toBeGreaterThan(1000);
+    expect(sentenceCount(reply.text)).toBeGreaterThanOrEqual(10);
+    expect(reply.text).toContain("harbor");
+    expect(reply.text).not.toMatch(META_PROMISE_PATTERN);
+  });
+
+  it("performs an authorized pending deliverable on ok/start (Case B)", async () => {
+    const model = continuationModel({
+      requestMarker: "harbor festival announcement",
+      fulfillment: HARBOR_ANNOUNCEMENT
+    });
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      semanticSections: [
+        {
+          kind: "RECENT_CONVERSATION",
+          state: "KNOWN",
+          summary:
+            "Assistant drafted a harbor festival announcement and asked for approval to post it. User has not approved yet."
+        }
+      ],
+      userMessage: "start",
+      generateChat: model.generateChat
+    });
+    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
+    const reply = result.decision.reply;
+    expect(reply.disposition).toBe("RESPOND");
+    if (reply.disposition !== "RESPOND") return;
+    expect(reply.text).toContain("harbor festival");
+    expect(sentenceCount(reply.text)).toBeGreaterThanOrEqual(3);
+    expect(reply.text).not.toMatch(META_PROMISE_PATTERN);
+  });
+
+  it("still permits a necessary clarification when information is genuinely missing (Case C)", async () => {
+    const clarification = "Which address should I send it to?";
+    const systems: string[] = [];
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      semanticSections: [
+        {
+          kind: "RECENT_CONVERSATION",
+          state: "KNOWN",
+          summary: "User mentioned a letter. No recipient, address, or delivery method was ever stated."
+        }
+      ],
+      userMessage: "Send it to her.",
+      generateChat: async (chat: ChatInput) => {
+        systems.push(chat.messages[0]?.content ?? "");
+        return output(JSON.stringify({ disposition: "RESPOND", text: clarification }));
+      }
+    });
+    // The invariant must not force arbitrary guessing: its qualifier stays
+    // in the contract so a model may ask instead of inventing an address.
+    expect(systems[0]).toContain(TASK_CONTINUATION_QUALIFIER);
+    expect(result.decision.reply).toEqual({ disposition: "RESPOND", text: clarification });
+  });
+
+  it("exposes a meta-promise when recent conversation drops the unresolved request", async () => {
+    const model = continuationModel({
+      requestMarker: "500-word article",
+      fulfillment: HARBOR_ARTICLE
+    });
+    const result = await createServerCharacterPort().generate({
+      prompt,
+      semanticSections: [
+        { kind: "TEMPORAL_CONTEXT", state: "UNAVAILABLE" }
+      ],
+      userMessage: "You choose.",
+      generateChat: model.generateChat
+    });
+    // Without the original request in context, even an invariant-following
+    // model cannot fulfill: the failure surfaces as the recognizable
+    // meta-promise instead of a silently accepted empty answer.
+    expect(result.decision.reply).toEqual({
+      disposition: "RESPOND",
+      text: "I'll start writing now."
+    });
+  });
+});
