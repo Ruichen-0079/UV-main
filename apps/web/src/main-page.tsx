@@ -530,8 +530,11 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const segmenter = new SpeechSegmenter();
+    // Speech segmentation doubles as the committed subtitle feed: always keep
+    // a session so speak segments reach Companion even when TTS audio is off.
+    // Only the playback admission remains TTS-gated.
+    speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
     if (shouldRequestTts) {
-      speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
       void apiClient
         .admitSpeechPlayback({ sessionId, requestId })
         .then((effect) => {
@@ -791,12 +794,10 @@ export function MainPage(): JSX.Element {
   function forwardSpeechSegments(requestId: string, text: string, language?: string): void {
     const speech = speechSessionRef.current;
     const bus = busRef.current;
-    if (
-      !speech ||
-      speech.generation !== requestId ||
-      !bus ||
-      !effectiveVoiceOutputRef.current.requestTts
-    ) {
+    // Speak segments are the single committed-text feed for Companion speech
+    // and Subtitle presentation. Always forward; Companion decides whether to
+    // queue audio or publish subtitles immediately when TTS is off.
+    if (!speech || speech.generation !== requestId || !bus) {
       return;
     }
     if (language) speech.language = language;
@@ -817,12 +818,9 @@ export function MainPage(): JSX.Element {
     if (!speech || speech.generation !== requestId || !bus) return;
     if (speech.ended) return;
     speech.ended = true;
-    if (!effectiveVoiceOutputRef.current.requestTts) {
-      // Let already-queued/playing local audio finish, but do not flush new
-      // text into synthesis after settings or service health disables TTS.
-      bus.post({ kind: "speech-end", requestId });
-      return;
-    }
+    // Always flush committed segments for Subtitle even when TTS audio is
+    // off; Companion suppresses audio queuing in that case but still
+    // publishes subtitle fallbacks.
     for (const segment of speech.segmenter.flush(reason)) {
       bus.post({
         kind: "speak",
@@ -1034,13 +1032,15 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "user-gesture" });
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
+    // Same committed-text authority as the user path: segmentation feeds
+    // Subtitle via Companion even when TTS audio is off.
+    speechSessionRef.current = {
+      generation: requestId,
+      segmenter: new SpeechSegmenter(),
+      sequence: 0,
+      ended: false
+    };
     if (shouldRequestTts) {
-      speechSessionRef.current = {
-        generation: requestId,
-        segmenter: new SpeechSegmenter(),
-        sequence: 0,
-        ended: false
-      };
       void apiClient
         .admitSpeechPlayback({ sessionId, requestId })
         .then((effect) => {
