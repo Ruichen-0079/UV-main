@@ -108,9 +108,12 @@ export class DotsTTSProvider implements TTSProvider {
             ...(input.voice ? { voice: input.voice } : {})
           })
         });
-        if (response.status !== 429) break;
+        if (response.status !== 429 && response.status !== 503) break;
         await response.arrayBuffer();
-        // Only busy (no work admitted) may be retried. One prior cancelled generation can drain.
+        // Only transient unavailability (no work admitted) may be retried.
+        // The local single-flight wrapper answers 429 while busy and 503
+        // while warming; both mean "try again shortly". One prior cancelled
+        // generation can drain.
         await new Promise<void>((resolve, reject) => {
           const abort = () => {
             clearTimeout(timer);
