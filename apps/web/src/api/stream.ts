@@ -324,6 +324,8 @@ function safeStreamErrorMessage(code: string): string {
     case "INVALID_API_KEY":
     case "PERMISSION_DENIED":
       return "Provider 认证失败。";
+    case "MODEL_NOT_FOUND":
+      return "Provider 模型或 API 地址不存在，请检查模型 ID 和 API Base URL。";
     case "RATE_LIMITED":
       return "Provider 请求过于频繁。";
     case "TIMEOUT":

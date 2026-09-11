@@ -268,6 +268,8 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewUrl::App(SurfaceId::Main.window_url().into()),
   )
   .title(SurfaceId::Main.window_title())
+  // Let the Live2D HTML dropzone receive files instead of native path events.
+  .disable_drag_drop_handler()
   .inner_size(960.0, 760.0)
   .min_inner_size(640.0, 480.0)
   .build()
@@ -304,6 +306,7 @@ fn build_webui_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewUrl::App(SurfaceId::WebUI.window_url().into()),
   )
   .title(SurfaceId::WebUI.window_title())
+  .disable_drag_drop_handler()
   .inner_size(1280.0, 820.0)
   .min_inner_size(800.0, 600.0)
   .resizable(true)

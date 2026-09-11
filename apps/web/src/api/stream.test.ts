@@ -217,6 +217,17 @@ describe("apiClient.streamMessage", () => {
     } satisfies Partial<MessageStreamError>);
   });
 
+  it("explains a missing provider model or endpoint without exposing upstream text", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: "MODEL_NOT_FOUND", message: "secret upstream details"
+    }), { status: 404 })) );
+    await expect(apiClient.streamMessage({ sessionId: "session-1", text: "hello", options: { voiceOutput: false } }))
+      .rejects.toMatchObject({ status: 404,
+        message: "Provider 模型或 API 地址不存在，请检查模型 ID 和 API Base URL。" });
+    expect(new MessageStreamError({ type: "error", code: "MODEL_NOT_FOUND",
+      message: "secret upstream details", retryable: false }).message)
+      .toBe("Provider 模型或 API 地址不存在，请检查模型 ID 和 API Base URL。");
+  });
   it("passes AbortSignal to fetch", async () => {
     const controller = new AbortController();
     const fetchMock = vi.fn().mockRejectedValue(new DOMException("Aborted", "AbortError"));

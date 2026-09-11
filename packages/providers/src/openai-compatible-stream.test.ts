@@ -257,6 +257,28 @@ describe("OpenAI-compatible native chat streaming", () => {
     );
   });
 
+  it("preserves the saved Product API path when streaming chat", async () => {
+    const body = `${frame({ choices: [{ delta: { content: "remote" } }] })}${frame("[DONE]")}`;
+    const fetchMock = vi.fn(async () => streamResponse([encoded(body)]));
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createProviderRegistryFromEnv({
+      NODE_ENV: "test",
+      PROVIDER_ALLOW_MOCKS: "false",
+      YUVI_PRODUCT_CONFIGURATION: JSON.stringify({
+        version: 1,
+        providers: [{ id: "remote", displayName: "Remote", adapter: "openai-compatible",
+          baseUrl: "https://api.deepinfra.com/v1/openai/", apiKey: "test-key" }],
+        models: [{ id: "chat", providerId: "remote", displayName: "Chat", modelId: "remote-model",
+          enabled: true, temperature: 0.7, contextWindow: null, capabilities: ["chat"] }],
+        routes: { chat: ["chat"], reasoning: [], proactive: [], embedding: [], vision: [], stt: [], tts: [] }
+      })
+    });
+    expect((await collect(registry.getChatProvider())).at(-1)).toMatchObject({
+      type: "completed", output: { message: { content: "remote" } }
+    });
+    expect(fetchMock).toHaveBeenCalledWith("https://api.deepinfra.com/v1/openai/chat/completions",
+      expect.objectContaining({ body: expect.stringContaining('"model":"remote-model"') }));
+  });
   it("falls back between real OpenAI-compatible routes before the first delta", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       if (String(input).includes("deepseek")) {

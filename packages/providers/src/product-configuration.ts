@@ -50,5 +50,7 @@ export function parseProductConfiguration(value: unknown): ProductConfiguration 
 }
 export function modelEndpoint(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
-  return base.endsWith("/v1") ? base : `${base}/v1`;
+  // Bare server origins retain the OpenAI /v1 convenience default.
+  // A supplied API path (for example /v1/openai) is already authoritative.
+  return new URL(base).pathname === "/" ? base + "/v1" : base;
 }
