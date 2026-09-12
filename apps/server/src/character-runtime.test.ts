@@ -78,7 +78,7 @@ describe("production Character runtime adapter", () => {
         userMessage: "Continue.",
         generateChat: async (chat) => {
           captures.push(chat.messages[0]!.content);
-          return output('{"disposition":"RESPOND","text":"The plan is ready."}');
+          return output('{"disposition":"RESPOND"}');
         }
       });
       expect(JSON.stringify(input)).toBe(before);
@@ -96,9 +96,9 @@ describe("production Character runtime adapter", () => {
     expect(captures[1]).toContain("2026-09-08T10:01:00Z");
   });
 
-  it("returns a full orthogonal CharacterDecision for an accepted RESPOND pass", async () => {
+  it("returns a body request with orthogonal control for an accepted RESPOND gate", async () => {
     const calls = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"A simple answer."}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
 
     const result = await createServerCharacterPort().generate({
@@ -109,7 +109,7 @@ describe("production Character runtime adapter", () => {
 
     expect(result.decision).toEqual({
       addressing: "DIRECTED_TO_YUVI",
-      reply: { disposition: "RESPOND", text: "A simple answer." },
+      reply: { disposition: "RESPOND", body: expect.any(Object) },
       proactive: { action: "KEEP" }
     });
     expect(result.providerMetadata.model).toBe("private-chat-model");
@@ -128,7 +128,7 @@ describe("production Character runtime adapter", () => {
     "admits explicit %s as the final %s Character expression language",
     async (language, name) => {
       const calls = characterHarness({
-        responses: [output('{"disposition":"RESPOND","text":"Final expression."}')]
+        responses: [output('{"disposition":"RESPOND"}')]
       });
 
       await createServerCharacterPort().generate({
@@ -195,7 +195,7 @@ describe("production Character runtime adapter", () => {
 
   it("re-enters Character with the completed Cognition round-trip and keeps it opaque", async () => {
     const calls = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"The final answer."}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
 
     const result = await createServerCharacterPort().generateAfterCognition({
@@ -208,7 +208,7 @@ describe("production Character runtime adapter", () => {
 
     expect(result.decision).toEqual({
       addressing: "DIRECTED_TO_YUVI",
-      reply: { disposition: "RESPOND", text: "The final answer." },
+      reply: { disposition: "RESPOND", body: expect.any(Object) },
       proactive: { action: "KEEP" }
     });
     const system = calls.generateChat.mock.calls[0]?.[0].messages[0]?.content ?? "";
@@ -263,7 +263,7 @@ describe("production Character runtime adapter", () => {
     const controller = new AbortController();
     controller.abort();
     const calls = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"Too late."}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
 
     await expect(
@@ -281,7 +281,7 @@ describe("production Character runtime adapter", () => {
     const controller = new AbortController();
     controller.abort();
     const calls = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"Too late."}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
 
     await expect(
@@ -300,7 +300,7 @@ describe("production Character runtime adapter", () => {
 describe("semantic current-screen grounding", () => {
   it("consumes pre-resolved user-image evidence without requesting a second visual cycle", async () => {
     const calls = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"It shows a permission error."}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
     const requestVisualEvidence = vi.fn(async () => ({
       status: "AVAILABLE" as const,
@@ -326,7 +326,7 @@ describe("semantic current-screen grounding", () => {
     expect(JSON.stringify(calls.generateChat.mock.calls[0])).toContain("untrusted evidence");
     expect(result.decision.reply).toMatchObject({
       disposition: "RESPOND",
-      text: "It shows a permission error."
+      body: expect.any(Object)
     });
   });
 
@@ -358,7 +358,7 @@ describe("semantic current-screen grounding", () => {
     const calls = characterHarness({
       responses: [
         output('{"visualNeed":"Read the visible error and relevant UI state"}'),
-        output('{"disposition":"RESPOND","text":"The dialog says permission denied."}')
+        output('{"disposition":"RESPOND"}')
       ]
     });
     const requestVisualEvidence = vi.fn(async () => ({
@@ -377,7 +377,7 @@ describe("semantic current-screen grounding", () => {
     });
     expect(result.decision.reply).toMatchObject({
       disposition: "RESPOND",
-      text: "The dialog says permission denied."
+      body: expect.any(Object)
     });
     expect(calls.generateChat).toHaveBeenCalledTimes(2);
     const resumed = calls.generateChat.mock.calls[1]![0];
@@ -410,7 +410,7 @@ describe("semantic current-screen grounding", () => {
       observations: "Screen contents are unknown"
     }));
     const ordinary = characterHarness({
-      responses: [output('{"disposition":"RESPOND","text":"Hello"}')]
+      responses: [output('{"disposition":"RESPOND"}')]
     });
     await createServerCharacterPort().generate({
       prompt,
@@ -439,7 +439,8 @@ describe("semantic current-screen grounding", () => {
 
 const TASK_CONTINUATION_PROBE = "fulfill that request in this response";
 const TASK_CONTINUATION_QUALIFIER = "when the work can be completed now";
-const META_PROMISE_PATTERN = /i'll (start|begin|choose)|give me a moment|what topic|which (style|topic)/i;
+const META_PROMISE_PATTERN =
+  /i'll (start|begin|choose)|give me a moment|what topic|which (style|topic)/i;
 
 function sentenceCount(text: string): number {
   return text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length;
@@ -456,13 +457,15 @@ function continuationModel(options: { requestMarker: string; fulfillment?: strin
   const systems: string[] = [];
   return {
     systems,
-    generateChat: async (chat: ChatInput): Promise<ChatOutput> => {
+    generateChat: async (): Promise<ChatOutput> => output('{"disposition":"RESPOND"}'),
+    streamReply: async function* (chat: ChatInput) {
       const system = chat.messages[0]?.content ?? "";
       systems.push(system);
       const follows =
         system.includes(TASK_CONTINUATION_PROBE) && system.includes(options.requestMarker);
       const text = follows ? (options.fulfillment ?? "") : "I'll start writing now.";
-      return output(JSON.stringify({ disposition: "RESPOND", text }));
+      yield { type: "text-delta" as const, text };
+      yield { type: "completed" as const, output: output(text) };
     }
   };
 }
@@ -506,15 +509,19 @@ describe("Character task-continuation invariant", () => {
       userMessage: "You choose.",
       generateChat: model.generateChat
     });
-    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
-    expect(model.systems[0]).toContain("500-word article");
+
     const reply = result.decision.reply;
     expect(reply.disposition).toBe("RESPOND");
-    if (reply.disposition !== "RESPOND") return;
-    expect(reply.text.length).toBeGreaterThan(1000);
-    expect(sentenceCount(reply.text)).toBeGreaterThanOrEqual(10);
-    expect(reply.text).toContain("harbor");
-    expect(reply.text).not.toMatch(META_PROMISE_PATTERN);
+    if (reply.disposition !== "RESPOND" || !("body" in reply))
+      throw new Error("Missing streamed body");
+    let text = "";
+    for await (const event of model.streamReply(reply.body))
+      if (event.type === "text-delta") text += event.text;
+    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
+    expect(text.length).toBeGreaterThan(1000);
+    expect(sentenceCount(text)).toBeGreaterThanOrEqual(10);
+    expect(text).toContain("harbor");
+    expect(text).not.toMatch(META_PROMISE_PATTERN);
   });
 
   it("performs an authorized pending deliverable on ok/start (Case B)", async () => {
@@ -535,17 +542,21 @@ describe("Character task-continuation invariant", () => {
       userMessage: "start",
       generateChat: model.generateChat
     });
-    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
+
     const reply = result.decision.reply;
     expect(reply.disposition).toBe("RESPOND");
-    if (reply.disposition !== "RESPOND") return;
-    expect(reply.text).toContain("harbor festival");
-    expect(sentenceCount(reply.text)).toBeGreaterThanOrEqual(3);
-    expect(reply.text).not.toMatch(META_PROMISE_PATTERN);
+    if (reply.disposition !== "RESPOND" || !("body" in reply))
+      throw new Error("Missing streamed body");
+    let text = "";
+    for await (const event of model.streamReply(reply.body))
+      if (event.type === "text-delta") text += event.text;
+    expect(model.systems[0]).toContain(TASK_CONTINUATION_PROBE);
+    expect(text).toContain("harbor festival");
+    expect(sentenceCount(text)).toBeGreaterThanOrEqual(3);
+    expect(text).not.toMatch(META_PROMISE_PATTERN);
   });
 
   it("still permits a necessary clarification when information is genuinely missing (Case C)", async () => {
-    const clarification = "Which address should I send it to?";
     const systems: string[] = [];
     const result = await createServerCharacterPort().generate({
       prompt,
@@ -553,19 +564,27 @@ describe("Character task-continuation invariant", () => {
         {
           kind: "RECENT_CONVERSATION",
           state: "KNOWN",
-          summary: "User mentioned a letter. No recipient, address, or delivery method was ever stated."
+          summary:
+            "User mentioned a letter. No recipient, address, or delivery method was ever stated."
         }
       ],
       userMessage: "Send it to her.",
       generateChat: async (chat: ChatInput) => {
         systems.push(chat.messages[0]?.content ?? "");
-        return output(JSON.stringify({ disposition: "RESPOND", text: clarification }));
+        return output('{"disposition":"RESPOND"}');
       }
     });
     // The invariant must not force arbitrary guessing: its qualifier stays
     // in the contract so a model may ask instead of inventing an address.
     expect(systems[0]).toContain(TASK_CONTINUATION_QUALIFIER);
-    expect(result.decision.reply).toEqual({ disposition: "RESPOND", text: clarification });
+    expect(result.decision.reply).toMatchObject({
+      disposition: "RESPOND",
+      body: expect.any(Object)
+    });
+    const reply = result.decision.reply;
+    if (reply.disposition !== "RESPOND" || !("body" in reply)) throw new Error("Missing body");
+    expect(reply.body.messages[0]?.content).toContain(TASK_CONTINUATION_QUALIFIER);
+    expect(reply.body.messages[1]?.content).toBe("Send it to her.");
   });
 
   it("exposes a meta-promise when recent conversation drops the unresolved request", async () => {
@@ -575,18 +594,17 @@ describe("Character task-continuation invariant", () => {
     });
     const result = await createServerCharacterPort().generate({
       prompt,
-      semanticSections: [
-        { kind: "TEMPORAL_CONTEXT", state: "UNAVAILABLE" }
-      ],
+      semanticSections: [{ kind: "TEMPORAL_CONTEXT", state: "UNAVAILABLE" }],
       userMessage: "You choose.",
       generateChat: model.generateChat
     });
     // Without the original request in context, even an invariant-following
     // model cannot fulfill: the failure surfaces as the recognizable
     // meta-promise instead of a silently accepted empty answer.
-    expect(result.decision.reply).toEqual({
-      disposition: "RESPOND",
-      text: "I'll start writing now."
-    });
+    const reply = result.decision.reply;
+    if (reply.disposition !== "RESPOND" || !("body" in reply)) throw new Error("Missing body");
+    const events = [];
+    for await (const event of model.streamReply(reply.body)) events.push(event);
+    expect(events[0]).toEqual({ type: "text-delta", text: "I'll start writing now." });
   });
 });

@@ -1982,10 +1982,56 @@ export class RuntimeOrchestrator {
         throw createRuntimeCancelledError(chatProvider.name);
       }
 
+      const gateCompletedAt = performance.now();
+      let firstDeltaAt: number | undefined;
+      let providerDeltaCount = 0;
+      const finalReply = characterResult.decision.reply;
+      let responseText =
+        finalReply.disposition === "RESPOND" && "text" in finalReply ? finalReply.text : "";
+      const streamed = finalReply.disposition === "RESPOND" && "body" in finalReply;
+      let responseMetadata = characterResult.providerMetadata;
+      if (streamed) {
+        for await (const event of streamCharacterBody(
+          chatProvider,
+          finalReply.body,
+          controller.signal
+        )) {
+          if (event.type === "completed") {
+            responseMetadata = event.output;
+          } else {
+            firstDeltaAt ??= performance.now();
+            providerDeltaCount += 1;
+            responseText += event.text;
+            yield {
+              type: "text-delta",
+              text: event.text,
+              language: resolveCharacterExpressionLanguage(
+                this.outputLanguage(),
+                responseText
+              ).toLowerCase(),
+              messageId: input.assistantMessageId,
+              sessionId: input.userEvent.payload.sessionId,
+              traceId: input.userEvent.traceId
+            };
+          }
+        }
+      }
+      if (streamed) {
+        this.options.logger?.info("Character response stream completed", {
+          traceId: input.userEvent.traceId,
+          semanticGateLatencyMs: Math.round(gateCompletedAt - startedAt),
+          firstTokenAfterGateMs:
+            firstDeltaAt === undefined ? null : Math.round(firstDeltaAt - gateCompletedAt),
+          totalResponseLatencyMs: Math.round(performance.now() - startedAt),
+          providerDeltaCount
+        });
+      }
+      if (controller.signal.aborted) throw createRuntimeCancelledError(chatProvider.name);
+
       const providerMetadata = this.safeProviderCallMetadata(
         "chat",
         chatProvider.name,
-        characterResult.providerMetadata,
+        responseMetadata,
         chatStatus
       );
       if (this.latestPromptPreview) {
@@ -2005,7 +2051,6 @@ export class RuntimeOrchestrator {
         };
       }
 
-      const finalReply = characterResult.decision.reply;
       if (finalReply.disposition === "SILENCE" || finalReply.disposition === "TERMINATE") {
         // Intentional Character control-flow outcome: the turn succeeded
         // without an assistant message. Nothing is persisted, published,
@@ -2032,7 +2077,7 @@ export class RuntimeOrchestrator {
 
       const reply = this.createAgentReply(
         input.userEvent,
-        finalReply.text,
+        responseText,
         providerMetadata,
         canonicalAgentReplyId(input.userEvent)
       );
@@ -2104,13 +2149,13 @@ export class RuntimeOrchestrator {
         }
       }
 
-      if (finalReply.text) {
+      if (!streamed && responseText) {
         yield {
           type: "text-delta",
-          text: finalReply.text,
+          text: responseText,
           language: resolveCharacterExpressionLanguage(
             this.outputLanguage(),
-            finalReply.text
+            responseText
           ).toLowerCase(),
           messageId: input.assistantMessageId,
           sessionId: input.userEvent.payload.sessionId,
@@ -2122,10 +2167,10 @@ export class RuntimeOrchestrator {
         messageId: input.assistantMessageId,
         sessionId: input.userEvent.payload.sessionId,
         traceId: input.userEvent.traceId,
-        content: finalReply.text,
+        content: responseText,
         language: resolveCharacterExpressionLanguage(
           this.outputLanguage(),
-          finalReply.text
+          responseText
         ).toLowerCase(),
         provider: providerMetadata.finalProvider ?? providerMetadata.name
       };
@@ -3071,13 +3116,28 @@ export class RuntimeOrchestrator {
       // assistant message. Callers must skip assistant-side commit work.
       return null;
     }
+    let responseText =
+      characterReply?.disposition === "RESPOND" && "text" in characterReply
+        ? characterReply.text
+        : "";
+    let responseMetadata = characterResult?.providerMetadata;
+    if (characterReply?.disposition === "RESPOND" && "body" in characterReply) {
+      for await (const event of streamCharacterBody(
+        chatProvider,
+        characterReply.body,
+        options.signal
+      )) {
+        if (event.type === "text-delta") responseText += event.text;
+        else responseMetadata = event.output;
+      }
+    }
     let output: ChatOutput | undefined;
     let providerMetadata: SafeProviderCallMetadata;
     if (characterResult) {
       providerMetadata = this.safeProviderCallMetadata(
         "chat",
         chatProvider.name,
-        characterResult.providerMetadata,
+        responseMetadata!,
         chatStatus
       );
     } else {
@@ -3115,7 +3175,7 @@ export class RuntimeOrchestrator {
 
     const reply = this.createAgentReply(
       event,
-      characterReply ? characterReply.text : (output?.message.content ?? ""),
+      characterReply ? responseText : (output?.message.content ?? ""),
       providerMetadata,
       canonicalAgentReplyId(event)
     );
@@ -6372,4 +6432,73 @@ function annotateProviderFallback(
       context.memoryFallbackReason ?? outcome.errorCode ?? `provider-status:${outcome.status}`,
     memoryFallbackSource: "legacy"
   };
+}
+
+/** Consume the selected provider's native stream; never synthesize deltas from completed text. */
+async function* streamCharacterBody(
+  provider: ChatProvider,
+  input: ChatInput,
+  signal?: AbortSignal
+): AsyncGenerator<ChatStreamEvent> {
+  if (
+    !provider.streamReply ||
+    provider.streamingMode === "compatible" ||
+    provider.streamingMode === "unsupported"
+  ) {
+    throw runtimeStreamProtocolError(
+      provider.name,
+      "Character RESPOND requires provider streaming."
+    );
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) controller.abort();
+  let iterator: AsyncIterator<ChatStreamEvent> | undefined;
+  let text = "";
+  let completed: ChatOutput | undefined;
+  try {
+    if (controller.signal.aborted) throw createRuntimeCancelledError(provider.name);
+    iterator = provider.streamReply(input, { signal: controller.signal })[Symbol.asyncIterator]();
+    while (true) {
+      const next = await iterator.next();
+      if (controller.signal.aborted) throw createRuntimeCancelledError(provider.name);
+      if (next.done) break;
+      if (completed)
+        throw runtimeStreamProtocolError(
+          provider.name,
+          "Provider emitted an event after completed."
+        );
+      const event = next.value;
+      if (event.type === "text-delta") {
+        if (!event.text || text.length + event.text.length > 8_000) {
+          throw runtimeStreamProtocolError(
+            provider.name,
+            "Invalid or over-budget Character response delta."
+          );
+        }
+        text += event.text;
+        yield event;
+      } else if (event.type === "completed") {
+        if (
+          !text.trim() ||
+          event.output.message.content !== text ||
+          event.output.finishReason === "length" ||
+          event.output.finishReason === "content_filter"
+        ) {
+          throw runtimeStreamProtocolError(provider.name, "Invalid Character stream completion.");
+        }
+        completed = event.output;
+      } else throw runtimeStreamProtocolError(provider.name, "Unknown Character stream event.");
+    }
+    if (!completed)
+      throw runtimeStreamProtocolError(provider.name, "Character stream ended without completion.");
+    yield { type: "completed", output: completed };
+  } catch (error) {
+    throw normalizeRuntimeStreamError(error, provider.name, controller.signal);
+  } finally {
+    controller.abort();
+    signal?.removeEventListener("abort", abort);
+    await iterator?.return?.();
+  }
 }

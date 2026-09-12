@@ -71,8 +71,33 @@ function completion(model: string, content: string, reasoningContent?: string) {
 
 type RecordedRequest = {
   model?: string;
+  stream?: boolean;
   messages?: Array<{ role: string; content: string }>;
 };
+
+function characterResponse(body: RecordedRequest, content: string, reasoningContent?: string) {
+  const clean = content.replace(/<think>[\s\S]*?<\/think>/g, "");
+  let reply: { disposition?: string; text?: string } | undefined;
+  try {
+    reply = JSON.parse(clean);
+  } catch {
+    /* Cognition is plain text. */
+  }
+  if (body.stream) {
+    const text = reply?.text ?? content;
+    const data = {
+      model: body.model,
+      choices: [{ delta: { content: text }, finish_reason: "stop" }]
+    };
+    return new Response(`data: ${JSON.stringify(data)}\n\ndata: [DONE]\n\n`, {
+      headers: { "content-type": "text/event-stream" }
+    });
+  }
+  if (reply?.disposition === "RESPOND") {
+    return completion(body.model ?? "unknown", '{"disposition":"RESPOND"}', reasoningContent);
+  }
+  return completion(body.model ?? "unknown", content, reasoningContent);
+}
 
 describe("ordinary production Character path", () => {
   it("keeps the live proactive subscription connected across runtime reload", async () => {
@@ -126,8 +151,8 @@ describe("ordinary production Character path", () => {
     const fetchSpy = vi.fn(async (_input: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as RecordedRequest;
       requests.push(body);
-      return completion(
-        body.model ?? "unknown",
+      return characterResponse(
+        body,
         '{"disposition":"RESPOND","text":"Simple production answer."}'
       );
     });
@@ -154,7 +179,7 @@ describe("ordinary production Character path", () => {
         model: "deepseek-ai/DeepSeek-V4-Flash-0731",
         capability: "chat"
       });
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
       expect(requests[0]?.model).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
     } finally {
       await app.close();
@@ -168,20 +193,13 @@ describe("ordinary production Character path", () => {
       requests.push(body);
       const call = requests.length;
       if (call === 1) {
-        return completion(
-          body.model ?? "unknown",
-          '{"disposition":"NEED_COGNITION","focus":"verification"}'
-        );
+        return characterResponse(body, '{"disposition":"NEED_COGNITION","focus":"verification"}');
       }
       if (call === 2) {
-        return completion(
-          body.model ?? "unknown",
-          "COMPLETE\nNormalized cognition answer.",
-          "private trace"
-        );
+        return characterResponse(body, "COMPLETE\nNormalized cognition answer.", "private trace");
       }
-      return completion(
-        body.model ?? "unknown",
+      return characterResponse(
+        body,
         '<think>private Character trace</think>{"disposition":"RESPOND","text":"Final production answer."}'
       );
     });
@@ -203,10 +221,11 @@ describe("ordinary production Character path", () => {
 
       expect(response.statusCode, response.body).toBe(200);
       expect(response.json().reply).toBe("Final production answer.");
-      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
       expect(requests.map((request) => request.model)).toEqual([
         "deepseek-ai/DeepSeek-V4-Flash-0731",
         "zai-org/GLM-5.3-Flash",
+        "deepseek-ai/DeepSeek-V4-Flash-0731",
         "deepseek-ai/DeepSeek-V4-Flash-0731"
       ]);
       expect(JSON.stringify(requests[1])).toContain("Please verify this production question.");
@@ -225,8 +244,8 @@ describe("ordinary production Character path", () => {
   it("uses the same Character disposition seam for ordinary message streaming", async () => {
     const fetchSpy = vi.fn(async (_input: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as RecordedRequest;
-      return completion(
-        body.model ?? "unknown",
+      return characterResponse(
+        body,
         '{"disposition":"RESPOND","text":"Streamed Character answer."}'
       );
     });
@@ -250,7 +269,7 @@ describe("ordinary production Character path", () => {
       expect(response.body).toContain("event: text-delta");
       expect(response.body).toContain("Streamed Character answer.");
       expect(response.body).toContain("event: completed");
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     } finally {
       await app.close();
     }
@@ -264,7 +283,7 @@ it("persists a controller P8 relationship correction through restart and project
     vi.fn(async (_input: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as RecordedRequest;
       requests.push(body);
-      return completion(body.model ?? "unknown", '{"disposition":"RESPOND","text":"P8 reached."}');
+      return characterResponse(body, '{"disposition":"RESPOND","text":"P8 reached."}');
     })
   );
   const env = {
@@ -354,14 +373,15 @@ it("reaches one Runtime-admitted file read, normalized observation, Cognition co
     '{"disposition":"NEED_COGNITION","focus":"verify count"}',
     'REQUEST_CAPABILITY\n{"capabilityRef":"capability://opaque/read-authorized-text","request":"Read the authorized count evidence."}',
     "The evidence says forty-two.",
-    '{"disposition":"RESPOND","text":"The count is forty-two."}'
+    '{"disposition":"RESPOND"}',
+    "The count is forty-two."
   ];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_input: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as RecordedRequest;
       requests.push(body);
-      return completion(body.model ?? "unknown", replies.shift()!);
+      return characterResponse(body, replies.shift()!);
     })
   );
   const env = productionTestEnv();
@@ -385,7 +405,7 @@ it("reaches one Runtime-admitted file read, normalized observation, Cognition co
     });
     expect(reply.statusCode, reply.body).toBe(200);
     expect(reply.json().reply).toBe("The count is forty-two.");
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(5);
     expect(JSON.stringify(requests[2])).toContain("The verified count is forty-two.");
     expect(JSON.stringify(requests[3])).toContain("COGNITION_RESULT");
     expect(JSON.stringify(requests[3])).toContain("The evidence says forty-two.");
@@ -455,8 +475,8 @@ it("binds a voice through the controller, restores it, and isolates resolved, mi
         return Response.json({ ok: true, data: {} });
       }
       chatRequests.push(body);
-      return completion(
-        body.model ?? "unknown",
+      return characterResponse(
+        body,
         '{"disposition":"RESPOND","text":"Speech reached Character."}'
       );
     })
@@ -516,6 +536,82 @@ it("binds a voice through the controller, restores it, and isolates resolved, mi
     expect(conflicting.statusCode, conflicting.body).toBe(200);
     expect(searchScopes).toEqual([]);
   } finally {
+    await app.close();
+  }
+});
+
+it("flushes native provider deltas over a real SSE socket before provider completion", async () => {
+  const realFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  let providerFinished = false;
+  const frame = (text: string) =>
+    encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as RecordedRequest;
+      if (!body.stream) return completion(body.model!, '{"disposition":"RESPOND"}');
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            wire = controller;
+            controller.enqueue(frame("今天"));
+          }
+        }),
+        { headers: { "content-type": "text/event-stream" } }
+      );
+    })
+  );
+  const env = productionTestEnv();
+  process.env = { ...env };
+  const app = await buildServer(loadServerConfig(env));
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  const address = app.server.address();
+  if (!address || typeof address === "string") throw new Error("Missing test address");
+  const abort = new AbortController();
+  try {
+    const response = await realFetch(`http://127.0.0.1:${address.port}/v1/messages/stream`, {
+      method: "POST",
+      signal: abort.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "socket",
+        content: "你好",
+        options: { readMemory: false, writeMemory: false }
+      })
+    });
+    const reader = response.body!.getReader();
+    let buffer = "";
+    const decoder = new TextDecoder();
+    async function nextFrame() {
+      while (!buffer.includes("\n\n")) {
+        const next = await reader.read();
+        if (next.done) throw new Error("Premature SSE completion");
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+      const end = buffer.indexOf("\n\n");
+      const next = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      return next;
+    }
+    expect(await nextFrame()).toContain('"text":"今天"');
+    expect(providerFinished).toBe(false);
+    wire.enqueue(frame("天气"));
+    expect(await nextFrame()).toContain('"text":"天气"');
+    expect(providerFinished).toBe(false);
+    wire.enqueue(frame("不错。"));
+    expect(await nextFrame()).toContain('"text":"不错。"');
+    expect(providerFinished).toBe(false);
+    providerFinished = true;
+    wire.enqueue(
+      encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    );
+    wire.close();
+    expect(await nextFrame()).toContain("event: completed");
+    await reader.cancel();
+  } finally {
+    abort.abort();
     await app.close();
   }
 });
