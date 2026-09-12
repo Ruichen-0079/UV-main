@@ -1,27 +1,31 @@
 :root {
-  --yuvi-bg: #f6f1ea;
-  --yuvi-bg-elevated: #fffaf4;
-  --yuvi-ink: #2a221c;
-  --yuvi-muted: #6f6258;
-  --yuvi-line: #e6d9cc;
-  --yuvi-accent: #c45c26;
-  --yuvi-accent-soft: #f3d7c4;
-  --yuvi-ok: #2f6f4f;
+  --yuvi-bg: #f8f7fc;
+  --yuvi-bg-elevated: #fbfaff;
+  --yuvi-ink: #454b6d;
+  --yuvi-muted: #69708d;
+  --yuvi-line: #deddec;
+  --yuvi-accent: #5f659f;
+  --yuvi-accent-fill: #a3a5e3;
+  --yuvi-on-accent: #30354f;
+  --yuvi-accent-soft: #eeecf9;
+  --yuvi-ok: #756189;
   --yuvi-warn: #9a6b16;
   --yuvi-bad: #a33b32;
   --yuvi-radius: 14px;
-  --yuvi-focus: 0 0 0 2px #fffaf4, 0 0 0 4px #c45c26;
+  --yuvi-focus: 0 0 0 2px var(--yuvi-bg-elevated), 0 0 0 4px var(--yuvi-accent);
 }
 
 html[data-yuvi-theme="dark"] {
-  --yuvi-bg: #161310;
-  --yuvi-bg-elevated: #221c18;
-  --yuvi-ink: #f4ece4;
-  --yuvi-muted: #b3a59a;
-  --yuvi-line: #3a312b;
-  --yuvi-accent: #e08a58;
-  --yuvi-accent-soft: #3a271c;
-  --yuvi-ok: #7dcea0;
+  --yuvi-bg: #202131;
+  --yuvi-bg-elevated: #292b3e;
+  --yuvi-ink: #e9e9f4;
+  --yuvi-muted: #b0b4ce;
+  --yuvi-line: #424660;
+  --yuvi-accent: #b5b9ec;
+  --yuvi-accent-fill: #a3a8db;
+  --yuvi-on-accent: #30354f;
+  --yuvi-accent-soft: #36394f;
+  --yuvi-ok: #d5b6db;
   --yuvi-warn: #e0b567;
   --yuvi-bad: #e08a84;
 }
@@ -36,7 +40,7 @@ html[data-yuvi-surface="webui"] body {
   min-height: 100vh;
   flex-direction: column;
   background:
-    radial-gradient(1200px 480px at 10% -10%, rgba(196, 92, 38, 0.08), transparent 55%),
+    radial-gradient(1200px 480px at 10% -10%, rgba(163, 165, 227, 0.08), transparent 55%),
     var(--yuvi-bg);
   color: var(--yuvi-ink);
 }
@@ -213,7 +217,7 @@ html[data-yuvi-surface="webui"] body {
   border-radius: 18px;
   background: var(--yuvi-bg-elevated);
   padding: 12px;
-  box-shadow: 0 18px 40px rgba(42, 34, 28, 0.16);
+  box-shadow: 0 18px 40px rgba(69, 75, 109, 0.16);
 }
 
 .yuvi-diagnostics {
@@ -226,7 +230,7 @@ html[data-yuvi-surface="webui"] body {
   overflow: hidden;
   border-top: 1px solid var(--yuvi-line);
   background: var(--yuvi-bg-elevated);
-  box-shadow: 0 -12px 32px rgba(42, 34, 28, 0.12);
+  box-shadow: 0 -12px 32px rgba(69, 75, 109, 0.12);
 }
 
 .yuvi-diagnostics-head {
@@ -431,7 +435,8 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .input:focus {
 }
 html[data-yuvi-surface="webui"] .yuvi-product-webui .button-primary {
   border-radius: 12px;
-  background: var(--yuvi-accent);
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
 }
 html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary {
   border-color: var(--yuvi-line);
@@ -569,7 +574,7 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   color: var(--yuvi-ink);
   font-size: 12px;
   font-weight: 700;
-  box-shadow: 0 10px 24px rgba(42, 34, 28, 0.14);
+  box-shadow: 0 10px 24px rgba(69, 75, 109, 0.14);
 }
 @media (max-width: 800px) {
   .yuvi-product-health-grid {
@@ -658,8 +663,8 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
 }
 .yuvi-product-button.is-primary {
   border-color: var(--yuvi-accent);
-  background: var(--yuvi-accent);
-  color: #fffaf4;
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
 }
 .yuvi-product-button:disabled {
   cursor: wait;
@@ -1024,17 +1029,17 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   color: var(--yuvi-muted);
 }
 .yuvi-configuration button {
-  border: 1px solid var(--yuvi-border, #d9cec5);
+  border: 1px solid var(--yuvi-line);
   border-radius: 10px;
   padding: 0.5rem 0.85rem;
   margin: 0.2rem;
-  background: var(--yuvi-panel, #fffaf5);
+  background: var(--yuvi-bg-elevated);
   font-size: 0.9rem;
   justify-self: start;
 }
 .yuvi-configuration button:hover:not(:disabled) {
-  background: #f2ded0;
-  color: #332923;
+  background: var(--yuvi-accent-soft);
+  color: var(--yuvi-ink);
 }
 .yuvi-configuration button:disabled {
   opacity: 0.45;
@@ -1047,11 +1052,11 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
 .yuvi-configuration input:not([type="checkbox"]):not([type="range"]),
 .yuvi-configuration select,
 .yuvi-configuration textarea {
-  border: 1px solid var(--yuvi-border, #d9cec5);
+  border: 1px solid var(--yuvi-line);
   border-radius: 8px;
   padding: 0.5rem 0.65rem;
   margin-top: 0.3rem;
-  background: var(--yuvi-panel, #fffaf5);
+  background: var(--yuvi-bg-elevated);
   color: inherit;
   max-width: 100%;
 }
@@ -1065,7 +1070,7 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
 }
 .yuvi-configuration fieldset {
   padding: 0.7rem;
-  border: 1px solid var(--yuvi-border, #d9cec5);
+  border: 1px solid var(--yuvi-line);
   border-radius: 8px;
 }
 .yuvi-configuration fieldset label {
@@ -1077,7 +1082,7 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   list-style: decimal inside;
 }
 .yuvi-configuration [role="alert"] {
-  border-left: 3px solid #aa744f;
+  border-left: 3px solid var(--yuvi-accent);
   padding: 0.6rem;
 }
 @media (min-width: 850px) {
@@ -1092,13 +1097,6 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
 
 /* Product control surface: navigation rail, readable settings, quiet hierarchy. */
 .yuvi-product-webui {
-  --yuvi-bg: #f5f6f4;
-  --yuvi-bg-elevated: #ffffff;
-  --yuvi-ink: #25342f;
-  --yuvi-muted: #64716b;
-  --yuvi-line: #dce2dc;
-  --yuvi-accent: #356951;
-  --yuvi-accent-soft: #e5eee7;
   --yuvi-border: var(--yuvi-line);
   --yuvi-panel: var(--yuvi-bg-elevated);
   --yuvi-focus: 0 0 0 2px var(--yuvi-bg-elevated), 0 0 0 4px var(--yuvi-accent);
@@ -1108,15 +1106,6 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .button-secondary:hover {
   font-size: 14px;
   line-height: 1.6;
   min-width: 0;
-}
-html[data-yuvi-theme="dark"] .yuvi-product-webui {
-  --yuvi-bg: #1b2420;
-  --yuvi-bg-elevated: #222d27;
-  --yuvi-ink: #e6eee8;
-  --yuvi-muted: #a6b6ab;
-  --yuvi-line: #3a493f;
-  --yuvi-accent: #93cbaa;
-  --yuvi-accent-soft: #334c3d;
 }
 .yuvi-product-sidebar {
   position: sticky;
@@ -1151,8 +1140,8 @@ html[data-yuvi-theme="dark"] .yuvi-product-webui {
   width: 35px;
   height: 39px;
   border-radius: 12px 12px 17px 12px;
-  background: var(--yuvi-accent);
-  color: var(--yuvi-bg-elevated);
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
   font-size: 29px;
   font-family: Georgia, serif;
   font-style: italic;
@@ -1316,8 +1305,8 @@ html[data-yuvi-theme="dark"] .yuvi-product-webui {
   gap: 16px;
 }
 .yuvi-product-webui .yuvi-configuration form button:not([type="button"]) {
-  background: var(--yuvi-accent);
-  color: var(--yuvi-bg-elevated);
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
   border-color: var(--yuvi-accent);
 }
 .yuvi-product-webui .yuvi-configuration label {
@@ -1569,26 +1558,18 @@ html[data-yuvi-surface="webui"] .yuvi-product-webui .settings-card {
 
 /* Main Chat: conversation is the product; operational configuration lives in WebUI. */
 html[data-yuvi-surface="main"] {
-  --yuvi-main-bg: #f7f9f7;
-  --yuvi-main-surface: #ffffff;
-  --yuvi-main-ink: #24322d;
-  --yuvi-main-muted: #718079;
-  --yuvi-main-line: #dce4df;
-  --yuvi-main-accent: #356951;
-  --yuvi-main-accent-soft: #e6efe9;
-  --yuvi-main-danger: #a33f3a;
+  --yuvi-main-bg: var(--yuvi-bg);
+  --yuvi-main-surface: var(--yuvi-bg-elevated);
+  --yuvi-main-ink: var(--yuvi-ink);
+  --yuvi-main-muted: var(--yuvi-muted);
+  --yuvi-main-line: var(--yuvi-line);
+  --yuvi-main-accent: var(--yuvi-accent);
+  --yuvi-main-accent-soft: var(--yuvi-accent-soft);
+  --yuvi-main-danger: var(--yuvi-bad);
   color-scheme: light;
 }
 
 html[data-yuvi-theme="dark"][data-yuvi-surface="main"] {
-  --yuvi-main-bg: #17201c;
-  --yuvi-main-surface: #202b26;
-  --yuvi-main-ink: #e9f0eb;
-  --yuvi-main-muted: #a6b5ad;
-  --yuvi-main-line: #39473f;
-  --yuvi-main-accent: #94cbaa;
-  --yuvi-main-accent-soft: #2d4437;
-  --yuvi-main-danger: #e08b86;
   color-scheme: dark;
 }
 
@@ -1654,8 +1635,8 @@ html[data-yuvi-surface="main"] #root {
   height: 52px;
   place-items: center;
   border-radius: 16px 16px 22px 16px;
-  background: var(--yuvi-main-accent);
-  color: var(--yuvi-main-surface);
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
   font-family: Georgia, serif;
   font-size: 38px;
   font-style: italic;
@@ -1953,8 +1934,8 @@ html[data-yuvi-surface="main"] #root {
 
 .yuvi-main-send,
 .yuvi-main-stop {
-  background: var(--yuvi-main-accent);
-  color: var(--yuvi-main-surface);
+  background: var(--yuvi-accent-fill);
+  color: var(--yuvi-on-accent);
 }
 
 .yuvi-main-send:hover:not(:disabled),
