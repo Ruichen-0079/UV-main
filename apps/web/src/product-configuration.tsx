@@ -160,7 +160,13 @@ export function ProductConfigurationPanel(
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [notice, setNotice] = useState("");
+  const [voiceLoadNotice, setVoiceLoadNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const writing = useRef(false);
+  const [testNotices, setTestNotices] = useState<Record<string, string>>({});
+  const [testing, setTesting] = useState<Set<string>>(new Set());
+  const testsInFlight = useRef(new Set<string>());
+  const refreshController = useRef<AbortController>();
   const [provider, setProvider] = useState<Provider>(emptyProvider);
   const [model, setModel] = useState<Model>(() => emptyModel(""));
   const [discovered, setDiscovered] = useState<{ modelId: string; contextWindow: number | null }[]>(
@@ -182,12 +188,15 @@ export function ProductConfigurationPanel(
   const timer = useRef<ReturnType<typeof setTimeout>>();
   const player = useRef<HTMLAudioElement | null>(null);
   const sampleUrl = useRef<string>();
-  async function refresh() {
-    setNotice("");
+  async function refresh(includeVoices = showVoices) {
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    refreshController.current = controller;
     setLoading(true);
     setLoadError(false);
     try {
-      const next = await request<Snapshot>("/product/configuration");
+      const next = await request<Snapshot>("/product/configuration", { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setState(next);
       setDraft(next.configuration);
       setProactive(next.proactive);
@@ -198,25 +207,29 @@ export function ProductConfigurationPanel(
           ? { id: primary.id, displayName: primary.displayName, notes: primary.notes }
           : emptyPersonDraft()
       );
-      if (showVoices) {
-        try {
-          setVoices(await request<Voices>("/product/voices"));
-        } catch {
-          setNotice(
+      if (includeVoices) {
+        setVoiceLoadNotice("");
+        void request<Voices>("/product/voices", { signal: controller.signal }).then((nextVoices) => {
+          if (!controller.signal.aborted) setVoices(nextVoices);
+        }).catch(() => {
+          if (!controller.signal.aborted) setVoiceLoadNotice(
             t("Voice profiles are unavailable. Check local speaker recognition and Memory.")
           );
-        }
+        });
       }
     } catch (error) {
+      if (controller.signal.aborted) return;
       setLoadError(true);
+      setNotice(error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }
   useEffect(() => {
     void refresh().catch((e) => setNotice(String(e)));
     return () => {
+      refreshController.current?.abort();
       clearTimeout(timer.current);
       releaseMicrophoneCapture(capture.current);
       player.current?.pause();
@@ -241,10 +254,14 @@ export function ProductConfigurationPanel(
     work: () => Promise<unknown>,
     message = t("Saved. Effective state refreshed.")
   ) {
+    if (writing.current) return false;
+    writing.current = true;
     setBusy(true);
     setNotice("");
+    let completed = false;
     try {
       const result = await work();
+      completed = true;
       await refresh();
       setNotice(
         result && typeof result === "object" && "message" in result
@@ -253,10 +270,32 @@ export function ProductConfigurationPanel(
       );
       return true;
     } catch (e) {
-      setNotice(e instanceof Error ? localizeProductMessage(e.message) : t("Action failed."));
+      const reason = e instanceof Error ? localizeProductMessage(e.message) : t("Action failed.");
+      setNotice(completed ? t("Action completed, but refreshing state failed: {0}", reason) : reason);
       return false;
     } finally {
+      writing.current = false;
       setBusy(false);
+    }
+  }
+  async function testProvider(id: string): Promise<void> {
+    if (testsInFlight.current.has(id)) return;
+    testsInFlight.current.add(id);
+    setTesting(new Set(testsInFlight.current));
+    setTestNotices((current) => ({ ...current, [id]: "" }));
+    try {
+      const result = await send<{ message: string; models?: typeof discovered }>(
+        `/product/providers/${id}/test`
+      );
+      setDiscovered(result.models ?? []);
+      setModel(emptyModel(id));
+      if (groupedAi) setAiSection("models");
+      setTestNotices((current) => ({ ...current, [id]: localizeProductMessage(result.message) }));
+    } catch (error) {
+      setTestNotices((current) => ({ ...current, [id]: error instanceof Error ? localizeProductMessage(error.message) : t("Action failed.") }));
+    } finally {
+      testsInFlight.current.delete(id);
+      setTesting(new Set(testsInFlight.current));
     }
   }
   async function save(configuration = draft) {
@@ -374,6 +413,12 @@ export function ProductConfigurationPanel(
         </nav>
       )}
       {loading && !state && !show("status") && <p role="status">{t("Loading configuration…")}</p>}
+      {Object.entries(testNotices).map(([id, message]) => message && (
+        <p key={id} role="status">
+          {state?.configuration.providers.find((item) => item.id === id)?.displayName ?? id}: {message}
+        </p>
+      ))}
+      {voiceLoadNotice && <p role="alert">{voiceLoadNotice}</p>}
       {loadError && (
         <div role="alert" className="yuvi-product-inline-state is-error">
           {t("Could not load settings. Check the connection and try again.")}
@@ -448,7 +493,7 @@ export function ProductConfigurationPanel(
                 <div key={p.id} className="flex gap-2 flex-wrap">
                   <strong>{p.displayName}</strong>
                   <span>{p.baseUrl}</span>
-                  <button disabled={busy} onClick={() => setProvider({ ...p, apiKey: undefined })}>
+                  <button onClick={() => setProvider({ ...p, apiKey: undefined })}>
                     {t("Edit provider")}
                   </button>
                   <button
@@ -473,18 +518,8 @@ export function ProductConfigurationPanel(
                     {t("Delete provider")}
                   </button>
                   <button
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        const result = await send<{ message: string; models?: typeof discovered }>(
-                          `/product/providers/${p.id}/test`
-                        );
-                        setDiscovered(result.models ?? []);
-                        setModel(emptyModel(p.id));
-                        if (groupedAi) setAiSection("models");
-                        return result;
-                      }, t("Connection test completed. Discovered models appear below; manual IDs are always available."))
-                    }
+                    disabled={testing.has(p.id)}
+                    onClick={() => void testProvider(p.id)}
                   >
                     {t("Test connection / discover models")}
                   </button>

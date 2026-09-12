@@ -111,3 +111,42 @@ test("portable static WebUI proxies /ws to its explicit Runtime port", async (t)
     host: `127.0.0.1:${runtimePort}`
   });
 });
+
+test("Portable fallback serves presentation while starting and gates HTTP/WS on its pinned Supervisor", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-static-binding-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "index.html"), "YUVI presentation");
+  let hits = 0;
+  const runtime = http.createServer((_req, res) => { hits++; res.end("owned runtime"); });
+  const runtimePort = await listen(runtime);
+  let ownership = "none", status = "stopped";
+  const supervisor = http.createServer((req, res) => {
+    assert.equal(req.headers["x-yuvi-control-token"], "test-token");
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ instanceId: "portable-test", services: [{ id: "runtime", ownership, status, url: `http://127.0.0.1:${runtimePort}/health` }] }));
+  });
+  const supervisorPort = await listen(supervisor);
+  t.after(() => { runtime.closeAllConnections(); runtime.close(); supervisor.closeAllConnections(); supervisor.close(); });
+  const endpointFile = path.join(root, "endpoint.json");
+  fs.writeFileSync(endpointFile, JSON.stringify({ host: "127.0.0.1", port: supervisorPort, pid: 12345, instanceId: "portable-test", controlToken: "test-token" }));
+  const pointerFile = path.join(root, "active-instance.json");
+  fs.writeFileSync(pointerFile, JSON.stringify({ pid: 12345, instanceId: "portable-test", endpointFile }));
+  const webPort = await freePort();
+  const child = spawn(process.execPath, [serverScript, "--root", root, "--port", String(webPort), "--runtime-port", String(runtimePort)], {
+    env: { ...process.env, YUVI_PORTABLE_VERSION: "0.1.2", YUVI_SUPERVISOR_STATE_ROOT: root, YUVI_EXPECTED_SUPERVISOR_PID: "12345" }, stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(async () => { if (child.exitCode === null) { child.kill(); await once(child, "exit"); } });
+  await waitForListening(child);
+  assert.equal(await (await fetch(`http://127.0.0.1:${webPort}/`)).text(), "YUVI presentation");
+  for (const state of [["none", "stopped"], ["owned", "starting"], ["external", "healthy"]]) {
+    [ownership, status] = state;
+    assert.equal((await fetch(`http://127.0.0.1:${webPort}/api/health`)).status, 503);
+    assert.match(await upgrade(webPort), /^HTTP\/1\.1 503/);
+  }
+  assert.equal(hits, 0);
+  ownership = "owned"; status = "healthy";
+  assert.equal(await (await fetch(`http://127.0.0.1:${webPort}/api/health`)).text(), "owned runtime");
+  fs.writeFileSync(pointerFile, JSON.stringify({ pid: 99999, instanceId: "portable-test", endpointFile }));
+  assert.equal((await fetch(`http://127.0.0.1:${webPort}/api/health`)).status, 503);
+  assert.equal(hits, 1);
+});

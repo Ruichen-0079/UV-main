@@ -30,6 +30,8 @@ describe("live speech capture", () => {
       disconnect: vi.fn()
     };
     const context = {
+      state: "suspended",
+      resume: vi.fn(async () => { context.state = "running"; }),
       destination: {},
       createMediaStreamSource: vi.fn(() => source),
       createScriptProcessor: vi.fn(() => processor),
@@ -46,6 +48,8 @@ describe("live speech capture", () => {
       createAudioContext: () => context as unknown as AudioContext
     });
 
+    expect(context.resume).toHaveBeenCalledOnce();
+    expect(context.resume.mock.invocationCallOrder[0]).toBeLessThan(getUserMedia.mock.invocationCallOrder[0]!);
     expect(capture.captureEpoch).toBe("epoch-live");
     expect(capture.trackSettings).toEqual({
       echoCancellation: true,
@@ -131,4 +135,15 @@ it("bounds delayed frames and aborts transport instead of replaying a stale micr
   expect(postFrame).toHaveBeenCalledTimes(1);
   expect(track.stop).toHaveBeenCalled();
   expect(context.close).toHaveBeenCalled();
+});
+
+it("closes the audio context when microphone permission is denied", async () => {
+  const denied = new DOMException("Denied", "NotAllowedError");
+  const context = { state: "running", close: vi.fn(async () => undefined) };
+  await expect(startLiveSpeechCapture({
+    sessionId: "s", postFrame: vi.fn(),
+    getUserMedia: async () => { throw denied; },
+    createAudioContext: () => context as unknown as AudioContext
+  })).rejects.toBe(denied);
+  expect(context.close).toHaveBeenCalledOnce();
 });

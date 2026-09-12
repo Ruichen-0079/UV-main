@@ -168,7 +168,7 @@ async function handle(
       }
     }
 
-    const serviceMatch = url.pathname.match(/^\/v1\/services\/([a-z_]+)\/(restart|stop|start)$/);
+    const serviceMatch = url.pathname.match(/^\/v1\/services\/([a-z0-9_]+)\/(restart|stop|start)$/);
     if (method === "POST" && serviceMatch) {
       const id = serviceMatch[1] as ServiceId;
       const action = serviceMatch[2];

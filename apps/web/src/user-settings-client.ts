@@ -3,7 +3,7 @@
  * Intentional: field keystrokes never call these helpers — only explicit Save / secret actions.
  */
 
-import { isTauriRuntime } from "./tauri-window.js";
+import { invokeDesktop, isTauriRuntime } from "./tauri-window.js";
 import type {
   SecretMutationResultDto,
   SecretStatusDto,
@@ -24,8 +24,7 @@ export async function fetchUserSettings(): Promise<SettingsViewDto> {
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SettingsViewDto>("get_user_settings");
+  return invokeDesktop<SettingsViewDto>("get_user_settings");
 }
 
 /**
@@ -95,8 +94,7 @@ export async function saveUserSettings(
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<UpdateSettingsResultDto>("update_user_settings", { patch });
+  return invokeDesktop<UpdateSettingsResultDto>("update_user_settings", { patch });
 }
 
 export async function setUserSecret(
@@ -106,22 +104,19 @@ export async function setUserSecret(
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SecretMutationResultDto>("set_user_secret", { key, value });
+  return invokeDesktop<SecretMutationResultDto>("set_user_secret", { key, value });
 }
 
 export async function deleteUserSecret(key: UserSecretKey): Promise<SecretMutationResultDto> {
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SecretMutationResultDto>("delete_user_secret", { key });
+  return invokeDesktop<SecretMutationResultDto>("delete_user_secret", { key });
 }
 
 export async function fetchUserSecretStatus(): Promise<SecretStatusDto> {
   if (!isTauriRuntime()) {
     throw new Error("User settings require the Tauri desktop shell.");
   }
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<SecretStatusDto>("get_user_secret_status");
+  return invokeDesktop<SecretStatusDto>("get_user_secret_status");
 }

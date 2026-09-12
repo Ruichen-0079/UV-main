@@ -1,4 +1,5 @@
 import { resolveApiBaseUrl } from "../desktop-runtime.js";
+import { withActionDeadline } from "../action-deadline.js";
 import type { EmbodiedPresentationOutcomeReport } from "@companion/protocol";
 import {
   MessageSseParser,
@@ -1018,6 +1019,19 @@ export const apiClient = {
   getLocalServices(signal?: AbortSignal): Promise<LocalServicesStatus> {
     return request("/local-services/status", signalRequestInit(signal));
   },
+  detectLocalServices(signal?: AbortSignal): Promise<LocalConnectionDetectResponse> {
+    return request("/product/local-services/detect", signalRequestInit(signal));
+  },
+  probeLocalService(input: {
+    service: LocalConnectionService;
+    endpoint: string;
+    apiKey?: string;
+  }): Promise<LocalConnectionFinding> {
+    return request("/product/local-services/probe", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
   restartLocalServices(): Promise<{ ok: boolean }> {
     return request("/system/local-services/restart", { method: "POST" });
   },
@@ -1862,6 +1876,29 @@ export type LocalServicesStatus = {
   };
 };
 
+export type LocalConnectionService = "embedding" | "stt" | "tts";
+export type LocalConnectionState =
+  | "ready"
+  | "hibernated"
+  | "warming"
+  | "unavailable"
+  | "needs-key"
+  | "not-configured";
+export type LocalConnectionFinding = {
+  service: LocalConnectionService;
+  testedEndpoint: string;
+  source: "saved" | "default" | "explicit";
+  state: LocalConnectionState;
+  model?: string;
+  dimensions?: number;
+  voice?: string;
+  detail?: string;
+};
+export type LocalConnectionDetectResponse = {
+  checkedAt: string;
+  services: Record<LocalConnectionService, LocalConnectionFinding>;
+};
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
@@ -1871,17 +1908,24 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("authorization", `Bearer ${dashboardDevToken}`);
   }
 
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...init,
-    headers
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new ApiError(text || response.statusText, response.status);
+  const controller = new AbortController();
+  const abort = () => controller.abort(init?.signal?.reason);
+  if (init?.signal?.aborted) abort();
+  init?.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    return await withActionDeadline((async () => {
+      const response = await fetch(`${apiBaseUrl()}${path}`, {
+        ...init, headers, signal: controller.signal
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(text || response.statusText, response.status);
+      }
+      return response.json() as Promise<T>;
+    })(), path.includes("/import") ? 120_000 : 60_000, () => controller.abort());
+  } finally {
+    init?.signal?.removeEventListener("abort", abort);
   }
-
-  return response.json() as Promise<T>;
 }
 
 function shouldAttachDashboardDevToken(path: string, method: string | undefined): boolean {
@@ -1953,6 +1997,8 @@ function safeClientErrorMessage(code: string): string {
     case "INVALID_API_KEY":
     case "PERMISSION_DENIED":
       return "Provider 认证失败。";
+    case "MODEL_NOT_FOUND":
+      return "Provider 模型或 API 地址不存在，请检查模型 ID 和 API Base URL。";
     case "RATE_LIMITED":
       return "Provider 请求过于频繁。";
     case "TIMEOUT":
@@ -1991,7 +2037,13 @@ export function resolveWebSocketUrl(path: string): string {
 }
 
 export async function productSample(id: string): Promise<Blob> {
- const response = await fetch(`${apiBaseUrl()}/product/voice-samples/${encodeURIComponent(id)}`, { headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {} });
- if (!response.ok) throw new Error("Sample unavailable.");
- return response.blob();
+  const controller = new AbortController();
+  return withActionDeadline((async () => {
+    const response = await fetch(`${apiBaseUrl()}/product/voice-samples/${encodeURIComponent(id)}`, {
+      headers: dashboardDevToken ? { authorization: `Bearer ${dashboardDevToken}` } : {},
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error("Sample unavailable.");
+    return response.blob();
+  })(), 30_000, () => controller.abort());
 }

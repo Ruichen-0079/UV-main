@@ -497,7 +497,8 @@ mod tests {
       "services": [{
         "id": "runtime",
         "ownership": "owned",
-        "url": "http://127.0.0.1:16121/"
+        "status": "healthy",
+        "url": "http://127.0.0.1:16121/health"
       }]
     });
     let (instance_id, runtime_url) =
@@ -508,12 +509,26 @@ mod tests {
   }
 
   #[test]
+  fn attached_runtime_binding_waits_for_supervisor_readiness_and_rejects_unknown_paths() {
+    let mut snapshot = serde_json::json!({
+      "instanceId": "portable-a",
+      "services": [{"id": "runtime", "ownership": "owned", "status": "starting", "url": "http://127.0.0.1:16121/health"}]
+    });
+    assert!(super::runtime_binding_from_snapshot(&snapshot, "portable-a", true).unwrap_err().contains("not ready"));
+    snapshot["services"][0]["status"] = serde_json::json!("healthy");
+    assert_eq!(super::runtime_binding_from_snapshot(&snapshot, "portable-a", true).unwrap().1, "http://127.0.0.1:16121");
+    snapshot["services"][0]["url"] = serde_json::json!("http://127.0.0.1:16121/other");
+    assert!(super::runtime_binding_from_snapshot(&snapshot, "portable-a", true).is_err());
+  }
+
+  #[test]
   fn attached_runtime_binding_rejects_stale_instance_identity() {
     let snapshot = serde_json::json!({
       "instanceId": "old-portable",
       "services": [{
         "id": "runtime",
         "ownership": "owned",
+        "status": "healthy",
         "url": "http://127.0.0.1:16121"
       }]
     });
@@ -541,6 +556,7 @@ mod tests {
       "services": [{
         "id": "runtime",
         "ownership": "owned",
+        "status": "healthy",
         "url": "http://192.0.2.10:16121"
       }]
     });
@@ -1368,6 +1384,10 @@ fn runtime_binding_from_snapshot(
     return Err("attach-only desktop Runtime is not owned by its bound Supervisor".to_string());
   }
 
+  if require_owned_runtime && runtime.get("status").and_then(Value::as_str) != Some("healthy") {
+    return Err("bound Supervisor Runtime is not ready".to_string());
+  }
+
   let runtime_url = runtime
     .get("url")
     .and_then(Value::as_str)
@@ -1378,7 +1398,7 @@ fn runtime_binding_from_snapshot(
     || !endpoint_host_is_loopback(parsed.host_str().unwrap_or_default())
     || !parsed.username().is_empty()
     || parsed.password().is_some()
-    || (parsed.path() != "/" && !parsed.path().is_empty())
+    || !matches!(parsed.path(), "" | "/" | "/health")
     || parsed.query().is_some()
     || parsed.fragment().is_some()
   {

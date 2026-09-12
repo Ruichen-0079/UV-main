@@ -1,7 +1,9 @@
 import { t } from "./locale.js";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiClient } from "./api/client.js";
 import { useAsyncData } from "./hooks/useAsyncData.js";
+
+import { invokeDesktop, isTauriRuntime } from "./tauri-window.js";
 
 export const LIVE2D_ZIP_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -28,7 +30,10 @@ export function inspectLive2DArchiveSelection(
 }
 
 export function defaultLive2DModelName(fileName: string): string {
-  const name = fileName.trim().replace(/\.zip$/iu, "").trim();
+  const name = fileName
+    .trim()
+    .replace(/\.zip$/iu, "")
+    .trim();
   return (name || "Live2D model").slice(0, 80);
 }
 
@@ -82,6 +87,76 @@ export function ProductLive2DModels(): JSX.Element {
   const [dragging, setDragging] = useState(false);
   const busy = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  const dropzone = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/webview")
+      .then(async ({ getCurrentWebview }) => {
+        if (disposed) return;
+        const remove = await getCurrentWebview().onDragDropEvent(
+          async ({
+            payload
+          }: {
+            payload:
+              | { type: "leave" }
+              | {
+                  type: "enter" | "over" | "drop";
+                  position: { x: number; y: number };
+                  paths: string[];
+                };
+          }) => {
+            if (disposed) return;
+            if (payload.type === "leave") {
+              setDragging(false);
+              return;
+            }
+            const rect = dropzone.current?.getBoundingClientRect();
+            const x = payload.position.x / window.devicePixelRatio;
+            const y = payload.position.y / window.devicePixelRatio;
+            const inside =
+              !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+            setDragging(inside && payload.type !== "drop" && !busy.current);
+            if (payload.type !== "drop" || !inside || busy.current) return;
+            if (payload.paths.length !== 1) {
+              chooseArchive([]);
+              setError(selectionErrorMessage("multiple-files"));
+              return;
+            }
+            busy.current = true;
+            setPending(true);
+            setError("");
+            try {
+              const path = payload.paths[0]!;
+              const bytes = await invokeDesktop<ArrayBuffer>("read_dropped_archive", { path });
+              if (!disposed)
+                chooseArchive([
+                  new File([bytes], path.split(/[\\/]/).pop()!, { type: "application/zip" })
+                ]);
+            } catch (error) {
+              if (!disposed) {
+                setArchive(null);
+                setError(modelActionError(error));
+              }
+            } finally {
+              busy.current = false;
+              if (!disposed) setPending(false);
+            }
+          }
+        );
+        if (disposed) remove();
+        else unlisten = remove;
+      })
+      .catch((error) => {
+        if (!disposed) setError(modelActionError(error));
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   async function act(work: () => Promise<unknown>, success: string): Promise<void> {
     if (busy.current) return;
@@ -299,6 +374,7 @@ export function ProductLive2DModels(): JSX.Element {
       />
       <div
         className={`yuvi-live2d-dropzone${dragging ? " is-dragging" : ""}`}
+        ref={dropzone}
         data-testid="live2d-zip-dropzone"
         onDragEnter={(event) => {
           event.preventDefault();
@@ -382,9 +458,7 @@ export function ProductLive2DModels(): JSX.Element {
 
       {pending && (
         <div role="status">
-          <span>
-            {progress === null ? t("Installing model…") : t("Reading model ZIP…")}
-          </span>
+          <span>{progress === null ? t("Installing model…") : t("Reading model ZIP…")}</span>
           <progress
             aria-label={t("Model operation progress")}
             {...(progress === null ? {} : { value: progress, max: 1 })}

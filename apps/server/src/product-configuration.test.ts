@@ -57,6 +57,18 @@ it("first run, discovery/manual ID, Chat admission, independent routes, fallback
   expect((await save(c)).statusCode).toBe(200); expect((await get()).routes.proactive.state).toBe("NOT_CONFIGURED");
   c.routes.stt = ["model-a"]; expect((await save(c)).statusCode).toBe(400);
 });
+it("discovers models at the saved custom API base", async () => {
+  const { app, save } = await setup();
+  const c = catalog();
+  c.providers[0]!.baseUrl = "https://api.deepinfra.com/v1/openai";
+  await save(c);
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "remote-model" }] })));
+  vi.stubGlobal("fetch", fetchMock);
+  const response = await app.inject({ method: "POST", url: "/product/providers/endpoint/test" });
+  expect(response.statusCode).toBe(200);
+  expect(response.json().models).toEqual([{ modelId: "remote-model", contextWindow: null }]);
+  expect(fetchMock).toHaveBeenCalledWith("https://api.deepinfra.com/v1/openai/models", expect.anything());
+});
 it("secrets never returned, stale writes rejected, failures and embedding restart requirements are truthful", async () => {
   const { app, context, save, get } = await setup(); const c = catalog(); c.providers[0]!.apiKey = "private-test-key"; c.routes.chat = ["model-a"];
   const initial = await save(c); expect(initial.body).not.toContain("private-test-key");

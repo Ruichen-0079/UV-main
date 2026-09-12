@@ -34,6 +34,11 @@ import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
+  createSpeechPipelineFeedback,
+  reduceSpeechPipelineFeedback,
+  type SpeechPipelineFeedback
+} from "./speech-pipeline-feedback.js";
+import {
   CompanionBus,
   type CompanionBusMessage,
   type CompanionPlaybackState,
@@ -162,6 +167,7 @@ export function MainPage(): JSX.Element {
     segmenter: SpeechSegmenter;
     sequence: number;
     ended: boolean;
+    feedback: SpeechPipelineFeedback;
   } | null>(null);
   const speechEpochRef = useRef<string | null>(null);
   const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
@@ -356,6 +362,13 @@ export function MainPage(): JSX.Element {
         bus.post({ kind: "tts-config", config: ttsConfigRef.current });
       } else if (message.kind === "speech-status") {
         if (speechEpochRef.current !== message.requestId) return;
+        const session = speechSessionRef.current;
+        if (session && session.generation === message.requestId) {
+          session.feedback = reduceSpeechPipelineFeedback(session.feedback, {
+            type: "queue-state",
+            state: message.state
+          });
+        }
         setVoicePlaybackStatus(message.state);
         if (message.state === "idle" || message.state === "stopped") {
           speechEpochRef.current = null;
@@ -377,6 +390,14 @@ export function MainPage(): JSX.Element {
         );
         playbackCorrelationRef.current = result.state;
         if (!result.accepted) return;
+        if (message.state === "ended") {
+          const session = speechSessionRef.current;
+          if (session && session.generation === message.requestId) {
+            session.feedback = reduceSpeechPipelineFeedback(session.feedback, {
+              type: "playback-ended"
+            });
+          }
+        }
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
         if (message.state === "started") {
           reportPlaybackOutcome(message.requestId, "STARTED");
@@ -529,9 +550,24 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "user-gesture" });
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
-    const segmenter = new SpeechSegmenter();
+    const feedback = createSpeechPipelineFeedback();
+    const segmenter = new SpeechSegmenter({
+      pipeline: () => {
+        const session = speechSessionRef.current;
+        return session?.generation === requestId ? session.feedback : undefined;
+      }
+    });
+    // Speech segmentation doubles as the committed subtitle feed: always keep
+    // a session so speak segments reach Companion even when TTS audio is off.
+    // Only the playback admission remains TTS-gated.
+    speechSessionRef.current = {
+      generation: requestId,
+      segmenter,
+      sequence: 0,
+      ended: false,
+      feedback
+    };
     if (shouldRequestTts) {
-      speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
       void apiClient
         .admitSpeechPlayback({ sessionId, requestId })
         .then((effect) => {
@@ -791,12 +827,10 @@ export function MainPage(): JSX.Element {
   function forwardSpeechSegments(requestId: string, text: string, language?: string): void {
     const speech = speechSessionRef.current;
     const bus = busRef.current;
-    if (
-      !speech ||
-      speech.generation !== requestId ||
-      !bus ||
-      !effectiveVoiceOutputRef.current.requestTts
-    ) {
+    // Speak segments are the single committed-text feed for Companion speech
+    // and Subtitle presentation. Always forward; Companion decides whether to
+    // queue audio or publish subtitles immediately when TTS is off.
+    if (!speech || speech.generation !== requestId || !bus) {
       return;
     }
     if (language) speech.language = language;
@@ -817,12 +851,9 @@ export function MainPage(): JSX.Element {
     if (!speech || speech.generation !== requestId || !bus) return;
     if (speech.ended) return;
     speech.ended = true;
-    if (!effectiveVoiceOutputRef.current.requestTts) {
-      // Let already-queued/playing local audio finish, but do not flush new
-      // text into synthesis after settings or service health disables TTS.
-      bus.post({ kind: "speech-end", requestId });
-      return;
-    }
+    // Always flush committed segments for Subtitle even when TTS audio is
+    // off; Companion suppresses audio queuing in that case but still
+    // publishes subtitle fallbacks.
     for (const segment of speech.segmenter.flush(reason)) {
       bus.post({
         kind: "speak",
@@ -1034,13 +1065,22 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "user-gesture" });
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
+    // Same committed-text authority as the user path: segmentation feeds
+    // Subtitle via Companion even when TTS audio is off.
+    const feedback = createSpeechPipelineFeedback();
+    speechSessionRef.current = {
+      generation: requestId,
+      segmenter: new SpeechSegmenter({
+        pipeline: () => {
+          const session = speechSessionRef.current;
+          return session?.generation === requestId ? session.feedback : undefined;
+        }
+      }),
+      sequence: 0,
+      ended: false,
+      feedback
+    };
     if (shouldRequestTts) {
-      speechSessionRef.current = {
-        generation: requestId,
-        segmenter: new SpeechSegmenter(),
-        sequence: 0,
-        ended: false
-      };
       void apiClient
         .admitSpeechPlayback({ sessionId, requestId })
         .then((effect) => {
@@ -1613,8 +1653,10 @@ function friendlyAudioError(error: unknown): string {
   if (error instanceof ApiError) return error.message || "语音转写请求失败。";
   if (error instanceof Error) {
     if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-      return "麦克风权限被拒绝，请在桌面应用设置中允许麦克风访问。";
+      return "麦克风访问被拒绝。请重新点击麦克风并允许访问；若桌面版没有权限提示，请重启更新后的 YUVI。";
     }
+    if (error.name === "NotFoundError") return "未找到麦克风。请连接麦克风，并在系统声音设置中选择输入设备后重试。";
+    if (error.name === "NotReadableError") return "无法打开麦克风。请在系统声音设置中检查输入设备，并关闭占用它的应用后重试。";
     if (error.message) return error.message;
   }
   return "语音录音或转写失败，请检查麦克风权限和本地语音服务。";

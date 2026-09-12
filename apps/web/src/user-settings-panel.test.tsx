@@ -44,4 +44,18 @@ describe("UserSettingsPanel product boundary", () => {
     expect(markup).not.toContain("Persona ID");
     expect(markup).not.toContain("Companion always on top");
   });
+
+  it("exposes the existing read-aloud preference without a second toggle", () => {
+    const full = renderToStaticMarkup(<UserSettingsPanel />);
+    expect(full).toContain("Speech output");
+    expect(full).toContain("Read replies aloud");
+
+    const speechOnly = renderToStaticMarkup(<UserSettingsPanel sections={["speech"]} />);
+    expect(speechOnly).toContain("Speech output");
+    expect(speechOnly).toContain("Read replies aloud");
+    expect(speechOnly).not.toContain("Proactive messages");
+
+    const memoryOnly = renderToStaticMarkup(<UserSettingsPanel sections={["memory"]} />);
+    expect(memoryOnly).not.toContain("Read replies aloud");
+  });
 });

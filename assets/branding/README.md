@@ -1,14 +1,17 @@
 # YUVI identity
 
-The original “meeting voices” mark joins two rounded arms into a Y, with a quiet
-presence above their meeting point. Muted jade and pale mint echo the Product
-WebUI. The enclosing dark tile keeps contrast on light and dark desktops.
-This is the application's identity, independent of any companion character.
+`yuvi.png` is the single canonical visual master, copied byte-for-byte from the
+user-provided `/home/ruichen/桌面/icon.png`. Preserve its character silhouette,
+pastel pink/lavender/cool-blue light, orbit motifs and original corners.
 
-`yuvi.svg` is the vector master. `yuvi-tray.svg` is the small-size optical master,
-with stronger contrast and a more visible outline. The existing Tauri tray owner
-uses its 32 px rendering; 16 and 22 px variants are provided for inspection.
+Regenerate with `python3 scripts/generate-app-icons.py` (Python 3 and Pillow
+required). No image-generation service or SVG renderer is needed. The script
+resizes the entire master without recoloring or cropping and refreshes all
+existing PNG platform slots, including the tray, plus multi-resolution ICO,
+ICNS and `apps/web/public/yuvi-icon.png` for the Web favicon.
 
-Regenerate with `python scripts/generate-app-icons.py` (Python Pillow and
-`rsvg-convert` required). Generated PNG, multi-resolution ICO and ICNS files live
-in `apps/desktop/src-tauri/icons`; `apps/desktop/app-icon.svg` is a generated copy.
+Tauri bundle configuration consumes the generated files in
+`apps/desktop/src-tauri/icons`. The existing tray owner uses `tray-32.png`.
+Linux desktop-entry generation consumes `128x128@2x.png` through the existing
+packaging script. Icon regeneration is source preparation; it does not build
+or package a release.

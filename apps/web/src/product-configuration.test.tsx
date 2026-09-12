@@ -26,7 +26,7 @@ it("first-run controls work with no Chat; compatible route assignment saves then
   const button = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Save routes & apply")!;
   await act(async () => props(button).onClick());
   const update = mock.request.mock.calls.find(c => c[1]?.method === "PUT"); expect(JSON.parse(update![1].body).configuration.routes.chat).toEqual(["a"]);
-  expect(mock.request.mock.calls.filter(c => c[0] === "/product/configuration" && !c[1]).length).toBeGreaterThan(1);
+  expect(mock.request.mock.calls.filter(c => c[0] === "/product/configuration" && !c[1]?.method).length).toBeGreaterThan(1);
   expect(readText(node)).toContain("RESTART_REQUIRED"); expect(readText(node)).toContain("Effective: None"); expect(props(button).disabled).toBe(false);
   const stt = nodes(node).find(n => n.attributes["aria-label"] === "Speech recognition route")!; expect(nodes(stt).filter(n => n.tagName === "OPTION").map(readText)).toEqual(["Select model"]);
 });
@@ -133,4 +133,58 @@ it("finishes failed loading and allows retry without leaving a blank settings pa
   );
   expect(readText(node)).toContain("Save model & apply");
   expect(readText(node)).not.toContain("Could not load settings");
+});
+
+it("a stalled provider test leaves writes usable, preserves the draft, and does not reload it", async () => {
+  let finish!: (value: unknown) => void;
+  mock.request.mockImplementation((url) => url.endsWith("/test")
+    ? new Promise(resolve => { finish = resolve; })
+    : Promise.resolve(snapshot()));
+  const node = await mount(["providers", "routes"]);
+  const route = nodes(node).find(n => n.attributes["aria-label"] === "Chat route")!;
+  const select = nodes(route).find(n => n.tagName === "SELECT")!;
+  await act(async () => props(select).onChange({ target: { value: "a" } }));
+  const test = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Test connection / discover models")!;
+  const save = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Save routes & apply")!;
+  await act(async () => { props(test).onClick(); });
+  expect(props(test).disabled).toBe(true);
+  expect(props(save).disabled).toBe(false);
+  const reads = mock.request.mock.calls.filter(c => c[0] === "/product/configuration").length;
+  await act(async () => finish({ message: "Connection test failed.", models: [] }));
+  expect(props(test).disabled).toBe(false);
+  expect(mock.request.mock.calls.filter(c => c[0] === "/product/configuration")).toHaveLength(reads);
+  await act(async () => props(save).onClick());
+  const write = mock.request.mock.calls.find(c => c[1]?.method === "PUT")!;
+  expect(JSON.parse(write[1].body).configuration.routes.chat).toEqual(["a"]);
+  expect(readText(node)).toContain("Connection test failed.");
+});
+
+it("a stalled optional voice refresh does not hold the configuration write lock", async () => {
+  mock.request.mockImplementation((url) => url === "/product/voices" ? new Promise(() => {}) : Promise.resolve(snapshot()));
+  const node = await mount();
+  const save = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Save routes & apply")!;
+  await act(async () => props(save).onClick());
+  expect(props(save).disabled).toBe(false);
+  expect(readText(node)).toContain("Saved. Effective state refreshed.");
+});
+
+it("a failed provider test recovers independently of a pending save and its error stays visible", async () => {
+  let finishSave!: (value: unknown) => void;
+  mock.request.mockImplementation((url, init) => {
+    if (url.endsWith("/test")) return Promise.reject(new Error("Provider request timed out"));
+    if (init?.method === "PUT") return new Promise(resolve => { finishSave = resolve; });
+    return Promise.resolve(snapshot());
+  });
+  const node = await mount(["providers", "routes"]);
+  const save = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Save routes & apply")!;
+  const test = nodes(node).find(n => n.tagName === "BUTTON" && readText(n) === "Test connection / discover models")!;
+  await act(async () => { props(save).onClick(); });
+  expect(props(save).disabled).toBe(true);
+  expect(props(test).disabled).toBe(false);
+  await act(async () => props(test).onClick());
+  expect(props(test).disabled).toBe(false);
+  expect(props(save).disabled).toBe(true);
+  await act(async () => finishSave(snapshot()));
+  expect(props(save).disabled).toBe(false);
+  expect(readText(node)).toContain("Provider request timed out");
 });

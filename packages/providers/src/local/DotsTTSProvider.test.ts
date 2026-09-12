@@ -87,4 +87,63 @@ describe("dots local adapter", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await expect(provider().synthesizeSpeech({ text: "hello" })).rejects.toThrow();
   });
+
+  it("retries a transient 503 warming response, then returns audio", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "warming" }), { status: 503 }))
+      .mockResolvedValue(wav());
+    const output = await provider().synthesizeSpeech({ text: "hello" });
+    expect(new TextDecoder().decode(output.audio.slice(0, 4))).toBe("RIFF");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("http://127.0.0.1:9881/tts");
+  });
+
+  it("keeps the existing 429 busy retry behavior", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "busy" }), { status: 429 }))
+      .mockResolvedValue(wav());
+    const output = await provider().synthesizeSpeech({ text: "hello" });
+    expect(new TextDecoder().decode(output.audio.slice(0, 4))).toBe("RIFF");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails truthfully once repeated 503s exhaust the transport bound", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: "warming" }), { status: 503 }));
+    const bounded = new DotsTTSProvider({
+      baseUrl: "http://127.0.0.1:9881",
+      model: "dots-studio/dots.tts-soar",
+      timeoutMs: 450
+    });
+    const startedAt = Date.now();
+    await expect(bounded.synthesizeSpeech({ text: "hello" })).rejects.toThrow();
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    expect(fetch.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("exits promptly when aborted during a 503 retry wait", async () => {
+    const controller = new AbortController();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      if (String(url).endsWith("/cancel")) return new Response("{}");
+      return new Response(JSON.stringify({ error: "warming" }), { status: 503 });
+    });
+    const pending = provider().synthesizeSpeech({ text: "hello" }, { signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    const startedAt = Date.now();
+    await expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toContain(
+      "http://127.0.0.1:9881/cancel"
+    );
+  });
+
+  it.each([400, 500])("fails immediately on HTTP %i without retrying", async (status) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status }));
+    await expect(provider().synthesizeSpeech({ text: "hello" })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });

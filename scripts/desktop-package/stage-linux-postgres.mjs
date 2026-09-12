@@ -56,6 +56,17 @@ export function validateLinuxPostgresDistribution(root, options = {}) {
   }
 
   const extensionDir = path.join(home, "share", "extension");
+  // Validate every extension required by the released Memory migrations.
+  for (const [extension, scripts] of [["pgcrypto", ["1.3"]], ["pg_trgm", ["1.3", "1.3--1.4", "1.4--1.5", "1.5--1.6"]]]) {
+    for (const file of [`${extension}.control`, ...scripts.map(version => `${extension}--${version}.sql`)]) {
+      if (!regularFile(path.join(extensionDir, file))) {
+        throw new Error(`Linux PostgreSQL distribution is missing ${extension} ${file}.`);
+      }
+    }
+    if (!listFiles(path.join(home, "lib")).some(file => path.basename(file) === `${extension}.so`)) {
+      throw new Error(`Linux PostgreSQL distribution is missing ${extension} ${extension}.so.`);
+    }
+  }
   const vectorControl = path.join(extensionDir, "vector.control");
   if (!regularFile(vectorControl)) {
     throw new Error("Linux PostgreSQL distribution is missing pgvector vector.control.");

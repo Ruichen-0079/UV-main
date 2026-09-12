@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
-"""Regenerate YUVI icons with librsvg (rsvg-convert) and Pillow."""
+"""Regenerate every YUVI application icon from the unchanged raster master."""
 from pathlib import Path
-import subprocess
-from PIL import Image
+from PIL import Image, ImageOps
 
 root = Path(__file__).resolve().parents[1]
-source = root / 'assets/branding'
+source = root / 'assets/branding/yuvi.png'
 output = root / 'apps/desktop/src-tauri/icons'
 output.mkdir(parents=True, exist_ok=True)
-for name, size in [('16x16.png', 16), ('32x32.png', 32), ('128x128.png', 128),
-                   ('128x128@2x.png', 256), ('icon.png', 1024)]:
-    subprocess.run(['rsvg-convert', '-w', str(size), '-h', str(size),
-                    '-o', str(output / name), str(source / 'yuvi.svg')], check=True)
-for size in [16, 22, 32]:
-    subprocess.run(['rsvg-convert', '-w', str(size), '-h', str(size),
-                    '-o', str(output / f'tray-{size}.png'), str(source / 'yuvi-tray.svg')], check=True)
-with Image.open(output / 'icon.png') as image:
-    image.save(output / 'icon.ico', sizes=[(s, s) for s in [16, 24, 32, 48, 64, 128, 256]])
-    image.save(output / 'icon.icns', sizes=[(s, s) for s in [16, 32, 64, 128, 256, 512, 1024]])
-(root / 'apps/desktop/app-icon.svg').write_bytes((source / 'yuvi.svg').read_bytes())
 
-# Refresh the existing platform slots too; no stale identity in future bundles.
-for file in sorted(output.rglob('*.png')):
-    if file.name.startswith('tray-'):
-        continue
+with Image.open(source) as original:
+    master = original.convert('RGBA')
+
+
+def render(size):
+    # Preserve the entire image, including its original corners. Existing
+    # non-square platform slots are padded, never cropped or stretched.
+    return ImageOps.pad(master, size, method=Image.Resampling.LANCZOS,
+                        color=(0, 0, 0, 0))
+
+
+slots = {}
+for file in output.rglob('*.png'):
     with Image.open(file) as image:
-        width, height = image.size
-    subprocess.run(['rsvg-convert', '-w', str(width), '-h', str(height),
-                    '-o', str(file), str(source / 'yuvi.svg')], check=True)
+        slots[file] = image.size
+for name, size in [('16x16.png', 16), ('32x32.png', 32), ('48x48.png', 48),
+                   ('64x64.png', 64), ('128x128.png', 128),
+                   ('128x128@2x.png', 256), ('icon.png', 1024)]:
+    slots[output / name] = (size, size)
+for size in [16, 22, 32]:
+    slots[output / f'tray-{size}.png'] = (size, size)
+for file, size in sorted(slots.items()):
+    render(size).save(file)
+
+render((1024, 1024)).save(output / 'icon.ico',
+    sizes=[(s, s) for s in [16, 24, 32, 48, 64, 128, 256]])
+render((1024, 1024)).save(output / 'icon.icns')
+render((32, 32)).save(root / 'apps/web/public/yuvi-icon.png')
+print(f'Generated {len(slots)} PNG platform slots, ICO, ICNS and Web favicon from {source}')

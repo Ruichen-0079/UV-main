@@ -10,6 +10,31 @@ import base64
 from urllib.parse import quote
 
 
+def _cpython_base_prefix() -> Path:
+    # A venv created from a symlinked interpreter (for example
+    # /usr/local/bin/python3.11 -> /usr/bin/python3.11) reports a misleading
+    # sys.base_prefix (/usr/local). Resolve the real interpreter prefix so
+    # stdlib natives keep their CPython attribution.
+    exe = Path(getattr(sys, "_base_executable", "") or sys.executable or "")
+    try:
+        resolved = exe.resolve()
+    except OSError:
+        return Path(sys.base_prefix)
+    if resolved.parent.name == "bin" and resolved.name.startswith("python"):
+        return resolved.parent.parent
+    return Path(sys.base_prefix)
+
+
+def _cpython_libpython(base: Path) -> Path | None:
+    # Source builds install <prefix>/lib/libpython3.11.so.1.0; Debian uses the
+    # multiarch <prefix>/lib/x86_64-linux-gnu/ layout.
+    for relative in ("lib/libpython3.11.so.1.0", "lib/x86_64-linux-gnu/libpython3.11.so.1.0"):
+        candidate = base / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def stage_runtime_notices(output: Path) -> None:
     dest = output / "licenses" / "runtime"
     dest.mkdir(parents=True, exist_ok=True)
@@ -59,10 +84,12 @@ def stage_runtime_notices(output: Path) -> None:
                     if not item.hash or item.hash.mode != "sha256" or base64.urlsafe_b64encode(hashlib.sha256(file.read_bytes()).digest()).decode().rstrip("=") != item.hash.value:
                         raise RuntimeError(f"Wheel RECORD mismatch: {dist.metadata['Name']}/{item}")
                     add(file, {"component": dist.metadata["Name"], "version": dist.version, "origin": "Debian fresh pip installation", "input": str(item)})
-        for file in (Path(sys.base_prefix) / "lib" / "python3.11" / "lib-dynload").glob("*.so"):
+        for file in (_cpython_base_prefix() / "lib" / "python3.11" / "lib-dynload").glob("*.so"):
             add(file, {"component": "CPython", "version": sys.version.split()[0], "origin": "Debian Python image"})
-        add(Path(sys.base_prefix) / "lib/libpython3.11.so.1.0", {"component": "CPython", "version": sys.version.split()[0], "origin": "Debian Python image"})
-        for package in ["libssl3", "libffi8", "libbz2-1.0", "liblzma5", "libtinfo6"]:
+        libpython = _cpython_libpython(_cpython_base_prefix())
+        if libpython is not None:
+            add(libpython, {"component": "CPython", "version": sys.version.split()[0], "origin": "Debian Python image"})
+        for package in ["libssl3", "libffi8", "libbz2-1.0", "liblzma5", "libtinfo6", "libuuid1", "libexpat1"]:
             paths = subprocess.check_output(["dpkg-query", "-L", package], text=True).splitlines()
             version = subprocess.check_output(["dpkg-query", "-W", "-f=${Version}", package], text=True)
             for file in paths:

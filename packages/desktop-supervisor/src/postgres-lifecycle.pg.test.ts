@@ -136,6 +136,23 @@ function persistenceConfig(
 }
 
 describePg("private postgres real PG16 acceptance", () => {
+  it("the attach start action initializes an unprepared private cluster and is idempotent", async () => {
+    if (!pgHome) throw new Error("PostgreSQL 16 distribution missing");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-attach-"));
+    tempDirs.push(root);
+    const cfg = persistenceConfig(pgHome, root, null, 0, "pg-attach", "attach-token");
+    const supervisor = new DesktopSupervisor(cfg);
+    supervisors.push(supervisor);
+    expect(supervisor.snapshot().services.find(s => s.id === "postgres")?.managed).toBe(false);
+    await supervisor.ensureService("postgres");
+    const ready = supervisor.snapshot().services.find(s => s.id === "postgres");
+    expect(ready).toMatchObject({status: "healthy", ownership: "owned"});
+    await supervisor.ensureService("postgres");
+    expect(supervisor.snapshot().services.find(s => s.id === "postgres")?.pid).toBe(ready?.pid);
+    await supervisor.shutdown();
+    expect(ready?.pid && inspectProcess(ready.pid).status).not.toBe("resolved");
+  }, 60000);
+
   it("writes through an authenticated live connection and survives restart", async () => {
     if (!distribution?.ok || !pgHome) throw new Error("PostgreSQL 16 distribution missing");
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-pg-persist-"));

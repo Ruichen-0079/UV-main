@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ConfigService {
+    portable: bool,
     settings_path: PathBuf,
     secrets: Arc<dyn SecretStore>,
     settings: Mutex<UserSettings>,
@@ -28,10 +29,20 @@ pub struct ConfigService {
 
 impl ConfigService {
     pub fn open(config_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
+        Self::open_with_profile(config_dir, secrets, false)
+    }
+
+    pub fn open_with_profile(config_dir: PathBuf, secrets: Arc<dyn SecretStore>, portable: bool) -> Self {
         fs::create_dir_all(&config_dir).ok();
         let settings_path = config_dir.join("settings.json");
-        let (settings, load_error) = load_or_default(&settings_path, &config_dir);
+        let (mut settings, load_error) = load_or_default(&settings_path, &config_dir);
+        if portable {
+            // Release transport addresses are fixed by the Portable launcher.
+            // Rebase old/default addresses without replacing Product preferences.
+            super::portable::rebase_endpoints(&mut settings);
+        }
         Self {
+            portable,
             settings_path,
             secrets,
             settings: Mutex::new(settings),
@@ -80,6 +91,9 @@ impl ConfigService {
             .map_err(|_| "config lock poisoned".to_string())?;
         let before = guard.clone();
         let after = apply_patch(&before, &patch)?;
+        if self.portable {
+            super::portable::validate(&after)?;
+        }
         atomic_write_json(&self.settings_path, &after)?;
         *guard = after.clone();
         drop(guard);
@@ -153,6 +167,7 @@ impl ConfigService {
 
     pub fn supervisor_env(&self) -> Result<BTreeMap<String, String>, String> {
         let settings = self.current_settings()?;
+        if self.portable { super::portable::validate(&settings)?; }
         combined_env_for_supervisor(&settings, self.secrets.as_ref())
     }
 
@@ -161,6 +176,7 @@ impl ConfigService {
         &self,
     ) -> Result<super::env_export::SupervisorConfigPush, String> {
         let settings = self.current_settings()?;
+        if self.portable { super::portable::validate(&settings)?; }
         super::env_export::supervisor_config_push(&settings, self.secrets.as_ref())
     }
 

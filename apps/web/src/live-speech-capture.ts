@@ -62,9 +62,26 @@ export async function startLiveSpeechCapture(
 
   const captureEpoch =
     options.createId?.() ?? globalThis.crypto?.randomUUID?.() ?? `epoch-${Date.now()}`;
-  const stream = await getUserMedia({ audio: LIVE_SPEECH_AUDIO_CONSTRAINTS, video: false });
-  const trackSettings = readMicrophoneTrackSettings(stream);
+  // Create/resume while Voice Mode's click still owns browser activation.
+  // Waiting for permission first loses that activation in WebKitGTK.
   const context = options.createAudioContext?.() ?? new AudioContextCtor!();
+  const resumed = context.state === "suspended"
+    ? context.resume().then(() => null, (error: unknown) => ({ error }))
+    : Promise.resolve(null);
+  let stream: MediaStream;
+  try {
+    stream = await getUserMedia({ audio: LIVE_SPEECH_AUDIO_CONSTRAINTS, video: false });
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
+  const resumeFailure = await resumed;
+  if (resumeFailure || context.state === "suspended") {
+    for (const track of stream.getTracks()) track.stop();
+    await context.close();
+    throw new Error("麦克风音频未能启动，请关闭语音模式后再次点击麦克风。");
+  }
+  const trackSettings = readMicrophoneTrackSettings(stream);
   const source = context.createMediaStreamSource(stream);
   const processor = context.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1);
   const silentGain = context.createGain?.();

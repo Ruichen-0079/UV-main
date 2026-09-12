@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64">
-  <title>YUVI — meeting voices</title>
-  <rect x="2" y="2" width="60" height="60" rx="17" fill="#243b3a"/>
-  <rect x="2.5" y="2.5" width="59" height="59" rx="16.5" fill="none" stroke="#83aaa1" stroke-opacity=".55"/>
-  <path d="M19 19v6c0 8 5 13 13 13s13-5 13-13v-6M32 38v10" fill="none" stroke="#d6ede3" stroke-width="7" stroke-linecap="round"/>
-  <circle cx="32" cy="20" r="4" fill="#8ccbb5"/>
-</svg>

@@ -133,6 +133,26 @@ function baseConfig(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig
   };
 }
 
+it("Portable refuses a Product push that retargets Installed services before committing it", async () => {
+  const cfg = baseConfig();
+  cfg.env = {...cfg.env, YUVI_PORTABLE_VERSION: "0.1.2", SERVER_PORT: "16121", MEM0_BASE_URL: "http://127.0.0.1:16131"};
+  const supervisor = createSupervisor(cfg);
+  for (const env of [{SERVER_PORT: "6121"}, {MEM0_BASE_URL: "http://127.0.0.1:6131"}, {YUVI_DATA_ROOT: "/installed"}]) {
+    await expect(supervisor.applyRuntimeConfig({env, unsetEnv: []})).rejects.toThrow("Portable isolation");
+  }
+  expect(supervisor.getConfig().env["SERVER_PORT"]).toBe("16121");
+});
+
+it("Portable cannot adopt or spawn over a healthy unowned local service", async () => {
+  vi.spyOn(health, "probeHttpHealth").mockResolvedValue({ok: true, statusCode: 200, protocolOk: true, message: "healthy foreign", latencyMs: 1});
+  const cfg = baseConfig();
+  cfg.env["YUVI_PORTABLE_VERSION"] = "0.1.2";
+  const supervisor = createSupervisor(cfg);
+  await supervisor.ensureService("runtime");
+  expect(supervisor.snapshot().services.find(s => s.id === "runtime")).toMatchObject({status: "unavailable", ownership: "external", pid: null});
+  expect(unexpectedSpawnCalls).toBe(0);
+});
+
 function packagedConfig(env: Record<string, string> = {}): SupervisorConfig {
   const resourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-res-"));
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "yuvi-packaged-data-"));
@@ -324,6 +344,50 @@ describe("DesktopSupervisor shutdown", () => {
     await supervisor.shutdown();
     expect(gracefulStop).not.toHaveBeenCalledWith(41_099);
     expect(runtime.ownership).toBe("none");
+  });
+
+  it("portable shutdown never stops externally routed local STT/TTS processes", async () => {
+    const cfg = baseConfig();
+    cfg.env = { ...cfg.env, YUVI_PORTABLE_VERSION: "0.1.2" };
+    const supervisor = createSupervisor(cfg);
+    const services = (
+      supervisor as unknown as {
+        services: Map<
+          string,
+          {
+            child: ReturnType<typeof fakeChild> | null;
+            ownership: "none" | "owned" | "external";
+            pid: number | null;
+          }
+        >;
+      }
+    ).services;
+    // Host-owned 9876/9881 while Product routes externally: observed only.
+    const localStt = services.get("local_stt");
+    const ttsWrapper = services.get("tts_wrapper");
+    if (!localStt || !ttsWrapper) throw new Error("expected local voice services");
+    localStt.child = null;
+    localStt.pid = 41_976;
+    localStt.ownership = "external";
+    ttsWrapper.child = null;
+    ttsWrapper.pid = 41_981;
+    ttsWrapper.ownership = "external";
+
+    const gracefulStop = vi
+      .spyOn(processWindows, "requestGracefulStop")
+      .mockImplementation(() => undefined);
+    const forceKill = vi
+      .spyOn(processWindows, "forceKillProcessTree")
+      .mockImplementation(() => undefined);
+    vi.spyOn(processWindows, "isProcessAlive").mockReturnValue(true);
+
+    await supervisor.stopService("local_stt");
+    await supervisor.stopService("tts_wrapper");
+    await supervisor.shutdown();
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_976);
+    expect(gracefulStop).not.toHaveBeenCalledWith(41_981);
+    expect(forceKill).not.toHaveBeenCalledWith(41_976);
+    expect(forceKill).not.toHaveBeenCalledWith(41_981);
   });
 });
 
@@ -1778,4 +1842,3 @@ describe("DesktopSupervisor bounded Local STT suspend", () => {
     );
   });
 });
-

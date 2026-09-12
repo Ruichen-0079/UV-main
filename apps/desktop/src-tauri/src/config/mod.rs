@@ -3,6 +3,7 @@ mod impact;
 mod schema;
 mod secrets;
 mod service;
+mod portable;
 mod validate;
 
 #[cfg(test)]
@@ -38,7 +39,12 @@ pub fn init_config_service(app: &AppHandle) -> Result<Arc<ConfigService>, String
         .app_config_dir()
         .map_err(|e| format!("app_config_dir unavailable: {e}"))?;
     let secrets: Arc<dyn SecretStore> = Arc::new(PlatformSecretStore);
-    let service = Arc::new(ConfigService::open(config_dir, secrets));
+    let portable = match std::env::var("YUVI_PORTABLE_VERSION") {
+        Ok(version) if version == env!("CARGO_PKG_VERSION") => true,
+        Ok(_) => return Err("Portable release identity mismatch".into()),
+        Err(_) => false,
+    };
+    let service = Arc::new(ConfigService::open_with_profile(config_dir, secrets, portable));
     Ok(service)
 }
 

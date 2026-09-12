@@ -216,7 +216,13 @@ export function validateLinuxMem0Artifact(artifactDir, options = {}) {
     }
   }
   const bytes = files.reduce((sum, file) => sum + fs.statSync(file).size, 0);
-  if (files.length <= 1000 || bytes <= 50 * 1024 * 1024) {
+  // PyInstaller packs pure Python into the executable; file counts vary with
+  // wheel/platform layout and cannot prove completeness (released Linux has 871).
+  for (const required of ["base_library.zip", "libpython3.11.so.1.0", "certifi/cacert.pem", "mem0ai-0.1.107.dist-info/METADATA"]) {
+    if (!regularFile(path.join(internal, required)))
+      throw new Error(`Linux Mem0 artifact is incomplete: missing ${required}.`);
+  }
+  if (bytes <= 50 * 1024 * 1024) {
     throw new Error("Linux Mem0 artifact is incomplete.");
   }
   return {
@@ -284,6 +290,11 @@ export function buildLinuxPackagedMem0(options = {}) {
     `${JSON.stringify(LINUX_MEM0_MANIFEST, null, 2)}\n`,
     { encoding: "utf8", mode: 0o644 }
   );
+  // PyInstaller's grpc hook collects SDK headers/type stubs as data. They are
+  // build inputs, not runtime dependencies, and the public artifact forbids them.
+  for (const file of listFiles(path.join(artifactDir, "_internal"))) {
+    if ([".h", ".hpp", ".pyi"].includes(path.extname(file))) fs.unlinkSync(file);
+  }
   const artifact = validateLinuxMem0Artifact(artifactDir, { repoRoot: REPO_ROOT });
   return { ...artifact, python };
 }

@@ -40,6 +40,8 @@ vi.mock("./api/client.js", () => ({
   ApiError: class ApiError extends Error {},
   apiClient: {
     streamMessage: vi.fn(),
+    reportSpeechPlaybackOutcome: vi.fn(async () => ({})),
+    admitSpeechPlayback: vi.fn(async () => ({ effectId: "effect-test" })),
     streamProactiveTurn: mockState.streamProactiveTurn,
     subscribeProactiveLive: mockState.subscribeProactiveLive,
     setProactiveConsent: vi.fn(async () => ({ ok: true, enabled: true })),
@@ -166,26 +168,26 @@ describe("MainPage proactive CompanionBus bridge", () => {
 
   it("projects a Runtime-scheduled assistant-only reply and ignores NO_OP", async () => {
     mockState.subscribeProactiveLive.mockImplementation(async (_sessionId, options) => {
-      options.onEvent?.({
+      options?.onEvent?.({
         type: "proactive-decision",
         decision: "NO_OP",
         sessionId: "default",
         traceId: "trace-no-op"
       });
-      options.onEvent?.({
+      options?.onEvent?.({
         type: "proactive-decision",
         decision: "REQUEST_TEXT",
         sessionId: "default",
         traceId: "trace-proactive"
       });
-      options.onEvent?.({
+      options?.onEvent?.({
         type: "text-delta",
         text: "proactive reply",
         messageId: "assistant-message",
         sessionId: "default",
         traceId: "trace-proactive"
       });
-      options.onEvent?.({
+      options?.onEvent?.({
         type: "completed",
         content: "proactive reply",
         messageId: "assistant-message",
@@ -284,6 +286,161 @@ it("converges Main and Companion TTS after a WebUI settings change", async () =>
     });
     expect(mockState.buses[0]?.posted).toContainEqual({
       kind: "tts-config", config: { enabled: false, mode: "external" }
+    });
+  } finally {
+    await act(async () => root?.unmount());
+    dom.restore();
+  }
+});
+
+it("renders at least two intermediate assistant states before completed", async () => {
+  const { apiClient } = await import("./api/client.js");
+  mockState.subscribeProactiveLive.mockResolvedValue(undefined);
+  let options!: Parameters<typeof apiClient.streamMessage>[1];
+  let finish!: (value: Awaited<ReturnType<typeof apiClient.streamMessage>>) => void;
+  vi.mocked(apiClient.streamMessage).mockImplementation((_input, incoming) => {
+    options = incoming;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const dom = installFakeDom();
+  let root!: Root;
+  const nodes = (node: import("./test-dom.js").FakeNode): import("./test-dom.js").FakeNode[] =>
+    [node, ...node.childNodes.flatMap(nodes)];
+  const props = (node: import("./test-dom.js").FakeNode): any =>
+    (node as any)[Object.keys(node).find(key => key.startsWith("__reactProps$"))!];
+  try {
+    await act(async () => {
+      root = createRoot(dom.container as unknown as Element);
+      root.render(createElement((await import("./main-page.js")).MainPage));
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.tagName === "TEXTAREA")!).onChange({
+        target: { value: "tell a story", style: {}, scrollHeight: 30 },
+        currentTarget: { style: {}, scrollHeight: 30 }
+      });
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.attributes["aria-label"] === "Send message")!).onClick();
+    });
+    const base = { traceId: "trace-stream-render", provider: "test", language: "en" };
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: "First visible" } as never));
+    expect(readText(dom.container)).toContain("First visible");
+    expect(readText(dom.container)).not.toContain("second visible");
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: ", second visible" } as never));
+    expect(readText(dom.container)).toContain("First visible, second visible");
+    expect(nodes(dom.container).some(node => node.attributes["aria-label"] === "Stop generating")).toBe(true);
+    await act(async () => {
+      const completed = { ...base, type: "completed" as const, content: "First visible, second visible" };
+      options?.onEvent?.(completed as never);
+      finish(completed as never);
+    });
+    expect(readText(dom.container)).toContain("First visible, second visible");
+    expect(nodes(dom.container).some(node => node.attributes["aria-label"] === "Stop generating")).toBe(false);
+  } finally {
+    await act(async () => root?.unmount());
+    dom.restore();
+  }
+});
+
+it("renders a single-delta Character response verbatim without artificial chunking", async () => {
+  const { apiClient } = await import("./api/client.js");
+  mockState.subscribeProactiveLive.mockResolvedValue(undefined);
+  let options!: Parameters<typeof apiClient.streamMessage>[1];
+  let finish!: (value: Awaited<ReturnType<typeof apiClient.streamMessage>>) => void;
+  vi.mocked(apiClient.streamMessage).mockImplementation((_input, incoming) => {
+    options = incoming;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const dom = installFakeDom();
+  let root!: Root;
+  const nodes = (node: import("./test-dom.js").FakeNode): import("./test-dom.js").FakeNode[] =>
+    [node, ...node.childNodes.flatMap(nodes)];
+  const props = (node: import("./test-dom.js").FakeNode): any =>
+    (node as any)[Object.keys(node).find(key => key.startsWith("__reactProps$"))!];
+  try {
+    await act(async () => {
+      root = createRoot(dom.container as unknown as Element);
+      root.render(createElement((await import("./main-page.js")).MainPage));
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.tagName === "TEXTAREA")!).onChange({
+        target: { value: "single reply", style: {}, scrollHeight: 30 },
+        currentTarget: { style: {}, scrollHeight: 30 }
+      });
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.attributes["aria-label"] === "Send message")!).onClick();
+    });
+    const base = { traceId: "trace-single-delta", provider: "test", language: "en" };
+    const single = "Complete Character answer in one delta.";
+    await act(async () => options?.onEvent?.({ ...base, type: "text-delta", text: single } as never));
+    // Frontend must dispatch exactly what it receives: no split, no merge.
+    expect(readText(dom.container)).toContain(single);
+    await act(async () => {
+      const completed = { ...base, type: "completed" as const, content: single };
+      options?.onEvent?.(completed as never);
+      finish(completed as never);
+    });
+    expect(readText(dom.container)).toContain(single);
+  } finally {
+    await act(async () => root?.unmount());
+    dom.restore();
+  }
+});
+
+it("releases a soft boundary after current-turn playback ends and rejects old feedback", async () => {
+  const { apiClient } = await import("./api/client.js");
+  mockState.subscribeProactiveLive.mockResolvedValue(undefined);
+  let options!: Parameters<typeof apiClient.streamMessage>[1];
+  let finish!: (value: Awaited<ReturnType<typeof apiClient.streamMessage>>) => void;
+  vi.mocked(apiClient.streamMessage).mockImplementation((_input, incoming) => {
+    options = incoming;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const dom = installFakeDom();
+  let root!: Root;
+  const nodes = (node: import("./test-dom.js").FakeNode): import("./test-dom.js").FakeNode[] =>
+    [node, ...node.childNodes.flatMap(nodes)];
+  const props = (node: import("./test-dom.js").FakeNode): any =>
+    (node as any)[Object.keys(node).find(key => key.startsWith("__reactProps$"))!];
+  try {
+    await act(async () => {
+      root = createRoot(dom.container as unknown as Element);
+      root.render(createElement((await import("./main-page.js")).MainPage));
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.tagName === "TEXTAREA")!).onChange({
+        target: { value: "single reply", style: {}, scrollHeight: 30 },
+        currentTarget: { style: {}, scrollHeight: 30 }
+      });
+    });
+    await act(async () => {
+      props(nodes(dom.container).find(node => node.attributes["aria-label"] === "Send message")!).onClick();
+    });
+    const bus = mockState.buses[0]!;
+    const turn = bus.posted.filter((message: any) => message.kind === "start-generation").at(-1) as { requestId: string };
+    const delta = async (text: string) => act(async () => options?.onEvent?.({
+      type: "text-delta", text, traceId: "feedback-test", language: "zh"
+    } as never));
+    const speaks = () => bus.posted.filter((message: any) => message.kind === "speak") as Array<{ text: string }>;
+    await delta("第一句话完整。");
+    expect(speaks()).toHaveLength(1);
+    await act(async () => {
+      bus.emit({ kind: "speech-status", requestId: turn.requestId, state: "playing" });
+      bus.emit({ kind: "playback-status", requestId: turn.requestId, segmentSequence: 0, state: "started" });
+      bus.emit({ kind: "playback-status", requestId: "old-turn", segmentSequence: 0, state: "ended" });
+    });
+    await delta("接下来这段话还在继续，");
+    expect(speaks()).toHaveLength(1);
+    await act(async () => bus.emit({
+      kind: "playback-status", requestId: turn.requestId, segmentSequence: 0, state: "ended"
+    }));
+    await delta("随后");
+    expect(speaks().map(message => message.text)).toEqual(["第一句话完整。", "接下来这段话还在继续，"]);
+    await act(async () => {
+      const completed = { type: "completed", content: "第一句话完整。接下来这段话还在继续，随后", traceId: "feedback-test" };
+      options?.onEvent?.(completed as never);
+      finish(completed as never);
     });
   } finally {
     await act(async () => root?.unmount());

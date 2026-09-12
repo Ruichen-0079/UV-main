@@ -242,6 +242,25 @@ describe("user settings reducer", () => {
     expect(patchFromForm(form)).toMatchObject({ proactive: { enabled: true } });
   });
 
+  it("round-trips the existing read-aloud preference without a new key", () => {
+    expect(defaultUserSettingsForm().ttsEnabled).toBe(false);
+    const view = sampleView();
+    view.settings.tts.enabled = true;
+    expect(formFromView(view).ttsEnabled).toBe(true);
+    const form = defaultUserSettingsForm();
+    form.ttsEnabled = true;
+    expect(patchFromForm(form)).toMatchObject({
+      tts: {
+        enabled: true,
+        mode: "external",
+        wrapperUrl: "http://127.0.0.1:9881",
+        upstreamUrl: "http://127.0.0.1:9880"
+      }
+    });
+    form.ttsEnabled = false;
+    expect(patchFromForm(form)).toMatchObject({ tts: { enabled: false } });
+  });
+
   it("maps the explicit local STT configuration into the save patch", () => {
     const form = defaultUserSettingsForm();
     form.sttProvider = "local";

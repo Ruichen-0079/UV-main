@@ -53,7 +53,8 @@ import {
   isTauriRuntime,
   preloadTauriWindowApi,
   startWindowDragging,
-  startWindowResizeDragging
+  startWindowResizeDragging,
+  trackWindowDragGesture
 } from "./tauri-window.js";
 
 /**
@@ -107,6 +108,14 @@ export function CompanionPage(): JSX.Element {
   const presentationChannelRef = useRef<CompanionPresentationProjectionChannel | null>(null);
   const rendererPresentationRef = useRef(rendererPresentation);
   const behaviorSessionIdRef = useRef("companion-page-session");
+  /**
+   * Subtitle fallback state: committed text must reach the Subtitle surface
+   * even when TTS synthesis/playback fails. The speech-synced path publishes
+   * on playbackStarted; these track what was already published so failure
+   * fallbacks never double-publish the same segment.
+   */
+  const subtitleFallbackCacheRef = useRef(new Map<string, { text: string; language: string }>());
+  const subtitlePublishedRef = useRef(new Set<string>());
   presenceProjectionRef.current = presence;
   ttsConfigRef.current = ttsConfig;
   rendererPresentationRef.current = rendererPresentation;
@@ -246,10 +255,35 @@ export function CompanionPage(): JSX.Element {
         text: segment.text,
         language: segment.language
       });
+      // Cache committed text for subtitle fallback if synthesis never
+      // completes (TTS service failure). Playback-synced publish remains the
+      // primary path; this cache is only read on failure.
+      subtitleFallbackCacheRef.current.set(`${session.requestId}:${segment.sequence}`, {
+        text: segment.text,
+        language: segment.language
+      });
       session.queue.enqueue(
         { text: segment.text, language: segment.language },
         { requestId: session.requestId, sequence: segment.sequence }
       );
+    }
+
+    function publishSubtitleFallback(
+      requestId: string,
+      sequence: number,
+      text: string,
+      language: string
+    ): void {
+      const key = `${requestId}:${sequence}`;
+      if (subtitlePublishedRef.current.has(key)) return;
+      subtitlePublishedRef.current.add(key);
+      publishSubtitleProjection({
+        kind: "committed-assistant-text",
+        requestId,
+        messageId: `${requestId}:${sequence}`,
+        text,
+        language
+      });
     }
 
     function acceptPlaybackEvent(event: SpeechPlaybackEvent): {
@@ -277,6 +311,11 @@ export function CompanionPage(): JSX.Element {
       publishSubtitleProjection({ kind: "clear" });
       activeEpochRef.current = requestId;
       speechStoppedEpochRef.current = null;
+      // New turn owns its subtitle fallback state; never replay old turns.
+      subtitlePublishedRef.current.clear();
+      for (const key of Array.from(subtitleFallbackCacheRef.current.keys())) {
+        if (!key.startsWith(`${requestId}:`)) subtitleFallbackCacheRef.current.delete(key);
+      }
       const previous = sessionRef.current;
       previous?.queue.cancel();
       sessionRef.current = null;
@@ -286,10 +325,16 @@ export function CompanionPage(): JSX.Element {
         reduceCompanionPresence(current, { type: "turn-start", epoch: requestId })
       );
       if (!voiceEnabledRef.current) {
+        for (const buffered of speechBuffer.drain(requestId)) {
+          publishSubtitleFallback(requestId, buffered.sequence, buffered.text, buffered.language);
+        }
         speechBuffer.clear();
         return;
       }
       if (ttsConfigRef.current?.enabled !== true) {
+        for (const buffered of speechBuffer.drain(requestId)) {
+          publishSubtitleFallback(requestId, buffered.sequence, buffered.text, buffered.language);
+        }
         speechBuffer.clear();
         return;
       }
@@ -321,8 +366,32 @@ export function CompanionPage(): JSX.Element {
             subtitleText.set(pending.segment.sequence, pending.item);
           },
           onItemState: (segment, state) => {
-            if (state === "cancelled" || state === "failed" || state === "completed")
+            if (state === "failed") {
+              // TTS failed but committed text must still reach Subtitle.
+              // Prefer the synthesized payload; fall back to the enqueued
+              // committed text when synthesis never completed.
+              const key = `${segment.requestId}:${segment.sequence}`;
+              if (!subtitlePublishedRef.current.has(key)) {
+                const synced = subtitleText.get(segment.sequence);
+                const fallback = subtitleFallbackCacheRef.current.get(key);
+                const payload = synced ?? fallback;
+                if (payload && segment.requestId === requestId) {
+                  subtitlePublishedRef.current.add(key);
+                  publishSubtitleProjection({
+                    kind: "committed-assistant-text",
+                    requestId,
+                    messageId: key,
+                    ...payload
+                  });
+                }
+              }
+            }
+            if (state === "cancelled" || state === "failed" || state === "completed") {
               subtitleText.delete(segment.sequence);
+              subtitleFallbackCacheRef.current.delete(
+                `${segment.requestId}:${segment.sequence}`
+              );
+            }
             recordSpeechLedger(segment.requestId, segment.sequence, state);
             if (import.meta.env.DEV) {
               const states = ((
@@ -353,13 +422,18 @@ export function CompanionPage(): JSX.Element {
             if (!accepted.accepted) return;
             if (event.type === "playbackStarted") {
               const subtitle = subtitleText.get(event.segment.sequence);
-              if (subtitle)
-                publishSubtitleProjection({
-                  kind: "committed-assistant-text",
-                  requestId,
-                  messageId: `${requestId}:${event.segment.sequence}`,
-                  ...subtitle
-                });
+              if (subtitle) {
+                const key = `${requestId}:${event.segment.sequence}`;
+                if (!subtitlePublishedRef.current.has(key)) {
+                  subtitlePublishedRef.current.add(key);
+                  publishSubtitleProjection({
+                    kind: "committed-assistant-text",
+                    requestId,
+                    messageId: key,
+                    ...subtitle
+                  });
+                }
+              }
               recordSpeechLedger(requestId, event.segment.sequence, "audio.play", {
                 queueSequence: event.sequence
               });
@@ -416,10 +490,14 @@ export function CompanionPage(): JSX.Element {
       }
       if (!voiceEnabledRef.current) {
         recordSpeechLedger(message.requestId, message.sequence, "voice-disabled-drop");
+        // Committed text still belongs on the Subtitle surface when audio is
+        // disabled; speech sync simply has no playback to align to.
+        publishSubtitleFallback(message.requestId, message.sequence, message.text, message.language);
         return;
       }
       if (ttsConfigRef.current?.enabled !== true) {
         recordSpeechLedger(message.requestId, message.sequence, "tts-disabled-drop");
+        publishSubtitleFallback(message.requestId, message.sequence, message.text, message.language);
         return;
       }
       recordSpeechLedger(message.requestId, message.sequence, "companion-receive", {
@@ -620,7 +698,13 @@ export function CompanionPage(): JSX.Element {
         if (!tauri || event.button !== 0) return;
         const target = event.target as HTMLElement;
         if (target.closest?.("[data-yuvi-resize-handle]")) return;
-        void startWindowDragging();
+        // Require movement before the native drag grab so simple clicks never
+        // leave an XWayland pointer grab active (fullscreen was the recovery).
+        const startX = event.clientX;
+        const startY = event.clientY;
+        trackWindowDragGesture(startX, startY, () => {
+          void startWindowDragging();
+        });
       }}
     >
       <LumiCanvas

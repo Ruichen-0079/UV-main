@@ -4474,6 +4474,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "url",
+ "webkit2gtk",
 ]
 
 [[package]]

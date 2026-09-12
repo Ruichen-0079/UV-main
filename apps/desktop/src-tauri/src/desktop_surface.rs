@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Window};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Window};
 
 use crate::config;
 
@@ -268,6 +268,8 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewUrl::App(SurfaceId::Main.window_url().into()),
   )
   .title(SurfaceId::Main.window_title())
+  // Let the Live2D HTML dropzone receive files instead of native path events.
+  .disable_drag_drop_handler()
   .inner_size(960.0, 760.0)
   .min_inner_size(640.0, 480.0)
   .build()
@@ -386,7 +388,8 @@ impl DesktopSurfaceManager {
     app: &AppHandle,
     surface: SurfaceId,
   ) -> tauri::Result<tauri::WebviewWindow> {
-    match surface {
+    let existing = app.get_webview_window(surface.window_label()).is_some();
+    let window = match surface {
       SurfaceId::Main => existing_or_create(
         app.get_webview_window(SurfaceId::Main.window_label()),
         || build_main_window(app),
@@ -403,7 +406,12 @@ impl DesktopSurfaceManager {
         app.get_webview_window(SurfaceId::Subtitle.window_label()),
         || build_subtitle_window(app),
       ),
-    }
+    }?;
+    #[cfg(target_os = "linux")]
+    if !existing { crate::webview_media::configure(&window)?; }
+    #[cfg(not(target_os = "linux"))]
+    let _ = existing;
+    Ok(window)
   }
 
   /// Dispatch one presentation command onto one existing surface.
@@ -412,11 +420,13 @@ impl DesktopSurfaceManager {
     surface: SurfaceId,
     command: SurfaceCommand,
   ) -> Result<(), String> {
-    match command {
+    let result = match command {
       SurfaceCommand::Show => Self::show(app, surface),
       SurfaceCommand::Hide => Self::hide(app, surface),
       SurfaceCommand::Toggle => Self::toggle(app, surface),
-    }
+    };
+    let _ = app.emit("desktop-surface.changed", ());
+    result
   }
 
   /// Persist only Companion presentation geometry. Runtime/User settings remain
@@ -512,7 +522,9 @@ impl DesktopSurfaceManager {
           .map_err(|error| error.to_string())?;
       }
     }
-    Self::subtitle_presentation_state(app)
+    let result = Self::subtitle_presentation_state(app);
+    let _ = app.emit("desktop-surface.changed", ());
+    result
   }
 
   /// Apply the configured Companion always-on-top presentation to the live

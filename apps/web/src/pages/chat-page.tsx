@@ -10,6 +10,11 @@ import { reduceChatMessages, shouldSubmitChatKey, type ChatMessage } from "../ch
 import { ChatMessageContent } from "../markdown-message.js";
 import { SpeechSegmenter } from "../speech-segmenter.js";
 import {
+  createSpeechPipelineFeedback,
+  reduceSpeechPipelineFeedback,
+  type SpeechPipelineFeedback
+} from "../speech-pipeline-feedback.js";
+import {
   applyCapabilityProjection,
   deriveCapabilityProjection,
   deriveEffectiveVoiceOutput,
@@ -121,6 +126,7 @@ export function ChatPage(): JSX.Element {
     segmenter: SpeechSegmenter;
     queue: SpeechPlaybackQueue;
     nextSegmentSequence: number;
+    feedback: SpeechPipelineFeedback;
   } | null>(null);
   const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
     createSpeechPlaybackCorrelation()
@@ -296,7 +302,13 @@ export function ChatPage(): JSX.Element {
       // Resume the shared Web Audio context while this send is still a user gesture.
       lumiRef.current?.resumeAudio();
       const generation = requestId;
-      const segmenter = new SpeechSegmenter();
+      const feedback = createSpeechPipelineFeedback();
+      const segmenter = new SpeechSegmenter({
+        pipeline: () => {
+          const session = speechSessionRef.current;
+          return session?.generation === generation ? session.feedback : undefined;
+        }
+      });
       const queue = new SpeechPlaybackQueue(
         (item, signal) =>
           apiClient.synthesizeSpeech({
@@ -310,6 +322,10 @@ export function ChatPage(): JSX.Element {
         {
           onState: (state) => {
             if (mountedRef.current && speechSessionRef.current?.generation === generation) {
+              speechSessionRef.current.feedback = reduceSpeechPipelineFeedback(
+                speechSessionRef.current.feedback,
+                { type: "queue-state", state }
+              );
               setVoicePlaybackStatus(state);
               applyPresenceEvent({ type: "queue", epoch: generation, state });
               if (state === "idle" || state === "stopped" || state === "error") {
@@ -347,6 +363,12 @@ export function ChatPage(): JSX.Element {
               );
               playbackCorrelationRef.current = result.state;
               if (!result.accepted) return;
+              if (event.type === "playbackEnded") {
+                speechSessionRef.current.feedback = reduceSpeechPipelineFeedback(
+                  speechSessionRef.current.feedback,
+                  { type: "playback-ended" }
+                );
+              }
               const playbackState =
                 event.type === "playbackStarted"
                   ? "started"
@@ -396,7 +418,8 @@ export function ChatPage(): JSX.Element {
         generation,
         segmenter,
         queue,
-        nextSegmentSequence: 0
+        nextSegmentSequence: 0,
+        feedback
       };
     }
     setRequestStatus("sending");

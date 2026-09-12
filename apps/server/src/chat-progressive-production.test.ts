@@ -39,7 +39,25 @@ async function chatEnv() {
     MEMORY_INGESTION_COORDINATOR_ENABLED: "false"
   };
 }
-function completion(content: string) {
+function completion(content: string, init?: RequestInit) {
+  const body = JSON.parse(String(init?.body ?? "{}"));
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    /* Non-Character provider. */
+  }
+  if (body.stream) {
+    const text = parsed?.text ?? content;
+    return new Response(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+      { headers: { "content-type": "text/event-stream" } }
+    );
+  }
+  if (parsed?.disposition === "RESPOND") {
+    const { text: _text, ...gate } = parsed;
+    content = JSON.stringify(gate);
+  }
   return new Response(
     JSON.stringify({
       choices: [{ finish_reason: "stop", message: { role: "assistant", content } }]
@@ -145,7 +163,7 @@ describe("Chat core production capability activation", () => {
       "fetch",
       vi.fn(async (_url: unknown, init?: RequestInit) => {
         requestedModels.push(JSON.parse(String(init?.body)).model);
-        return completion('{"disposition":"RESPOND","text":"Chat remains available."}');
+        return completion('{"disposition":"RESPOND","text":"Chat remains available."}', init);
       })
     );
     const handle = await contextFor(base);
@@ -173,7 +191,7 @@ describe("Chat core production capability activation", () => {
           }
         }
       }
-      expect(requestedModels).toEqual(Array(15).fill("chat-only"));
+      expect(requestedModels).toEqual(Array(30).fill("chat-only"));
     } finally {
       await handle.close();
     }
@@ -312,7 +330,7 @@ describe("Chat core production capability activation", () => {
         models.push(body.model);
         calls += 1;
         if (calls === 1) return completion('{"disposition":"NEED_COGNITION","focus":"verify"}');
-        return completion('{"disposition":"RESPOND","text":"I cannot verify that yet."}');
+        return completion('{"disposition":"RESPOND","text":"I cannot verify that yet."}', init);
       })
     );
     const handle = await contextFor(env);
@@ -365,7 +383,7 @@ describe("Chat core production capability activation", () => {
           summaries.push(input.messages[0]!.content);
           return {
             finishReason: "stop",
-            message: { role: "assistant", content: '{"disposition":"RESPOND","text":"Accepted."}' }
+            message: { role: "assistant", content: '{"disposition":"RESPOND"}' }
           };
         }
       });
@@ -397,9 +415,10 @@ describe("Chat core production capability activation", () => {
     process.env = env;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
+      vi.fn(async (_url: unknown, init?: RequestInit) =>
         completion(
-          '{"disposition":"RESPOND","text":"好，你先忙。","proactive":{"action":"SUPPRESS","scope":{"kind":"UNTIL","duration":"PT30M"}}}'
+          '{"disposition":"RESPOND","text":"好，你先忙。","proactive":{"action":"SUPPRESS","scope":{"kind":"UNTIL","duration":"PT30M"}}}',
+          init
         )
       )
     );
@@ -454,7 +473,7 @@ describe("Chat core production capability activation", () => {
         "fetch",
         vi.fn(async (_url: unknown, init?: RequestInit) => {
           requests.push(String(init?.body));
-          return completion('{"disposition":"RESPOND","text":"I will keep that in mind."}');
+          return completion('{"disposition":"RESPOND","text":"I will keep that in mind."}', init);
         })
       );
       let app = await buildServer(loadServerConfig(env));

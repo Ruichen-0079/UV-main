@@ -117,7 +117,16 @@ export type RuntimeCharacterCognitionExecutor = (
  * the one-round bound.
  */
 export type RuntimeCharacterTurnResult = Readonly<{
-  decision: CharacterDecision;
+  decision: Omit<CharacterDecision, "reply"> & {
+    reply:
+      | CharacterDecision["reply"]
+      | Readonly<{
+          disposition: "RESPOND";
+          /** Character-owned natural-language request, admitted by its semantic gate. */
+          body: ChatInput;
+          presentation?: import("@companion/character-abi").CharacterPresentationIntent;
+        }>;
+  };
   providerMetadata: Pick<
     ProviderMetadata,
     "model" | "latencyMs" | "tokenUsage" | "fallbackUsed" | "attemptedProviders" | "finalProvider"
@@ -141,7 +150,7 @@ export type RuntimeCharacterFinalTurnResult = Readonly<{
   decision: Readonly<{
     addressing: CharacterDecision["addressing"];
     reply: Extract<
-      CharacterDecision["reply"],
+      RuntimeCharacterTurnResult["decision"]["reply"],
       { disposition: "RESPOND" | "SILENCE" | "TERMINATE" }
     >;
     proactive: CharacterDecision["proactive"];

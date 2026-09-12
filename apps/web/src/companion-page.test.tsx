@@ -637,4 +637,65 @@ describe("spoken Subtitle lifecycle", () => {
       mounted.restore();
     }
   });
+
+  it("publishes committed text immediately when TTS is disabled", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      const bus = mockState.buses.at(-1);
+      await emitBus(bus, { kind: "start-generation", requestId: "turn-a", sessionId: "session" });
+      await emitBus(bus, {
+        kind: "tts-config",
+        config: { enabled: false, mode: "external" }
+      });
+      await emitBus(bus, {
+        kind: "speak",
+        requestId: "turn-a",
+        sequence: 0,
+        text: "字幕回退文本",
+        language: "zh"
+      });
+      expect(mockState.subtitles.at(-1)).toMatchObject({
+        kind: "committed-assistant-text",
+        requestId: "turn-a",
+        messageId: "turn-a:0",
+        text: "字幕回退文本",
+        language: "zh"
+      });
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
+
+  it("publishes fallback text when synthesis fails after enqueue", async () => {
+    const mounted = await mountCompanionPage();
+    try {
+      const bus = mockState.buses.at(-1);
+      await emitBus(bus, { kind: "start-generation", requestId: "turn-a", sessionId: "session" });
+      await emitBus(bus, {
+        kind: "speak",
+        requestId: "turn-a",
+        sequence: 0,
+        text: "fallback on failure",
+        language: "en"
+      });
+      const queue = mockState.queues.at(-1);
+      // No subtitle before terminal audio events; sync path still waits.
+      expect(mockState.subtitles.every((message) => message.kind === "clear")).toBe(true);
+      await act(async () => {
+        queue.callbacks.onItemState({ requestId: "turn-a", sequence: 0 }, "failed");
+        queue.callbacks.onError(new Error("synthesis failed"));
+      });
+      expect(mockState.subtitles.at(-1)).toMatchObject({
+        kind: "committed-assistant-text",
+        requestId: "turn-a",
+        messageId: "turn-a:0",
+        text: "fallback on failure",
+        language: "en"
+      });
+    } finally {
+      await act(async () => mounted.root.unmount());
+      mounted.restore();
+    }
+  });
 });

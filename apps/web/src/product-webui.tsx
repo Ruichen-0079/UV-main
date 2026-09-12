@@ -10,6 +10,7 @@ import { useAsyncData } from "./hooks/useAsyncData.js";
 import { ProductCompactHealth, productCompactHealthItems } from "./product-compact-health.js";
 import { ProductMemorySettings } from "./product-memory-settings.js";
 import { ProductConfigurationPanel } from "./product-configuration.js";
+import { ProductLocalServicesPanel } from "./product-local-services.js";
 import { isTauriRuntime } from "./tauri-window.js";
 import { UserSettingsPanel } from "./user-settings-panel.js";
 import { CompanionAppearanceSettings } from "./companion-appearance-settings.js";
@@ -32,6 +33,7 @@ export function ProductWebUI(): JSX.Element {
   );
   useEffect(() => {
     window.scrollTo?.(0, 0);
+    if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [view]);
   const navigate = (next: ProductView) => setView(next);
   if (view === "developer")
@@ -153,12 +155,18 @@ export function ProductWebUI(): JSX.Element {
             </>
           )}
           {view === "models" && (
-            <ProductConfigurationPanel sections={["providers", "models", "routes"]} />
+            <>
+              <ProductLocalServicesPanel />
+              <details className="yuvi-advanced">
+                <summary>{t("Advanced provider settings")}</summary>
+                <ProductConfigurationPanel sections={["providers", "models", "routes"]} />
+              </details>
+            </>
           )}
           {view === "people" && <ProductConfigurationPanel sections={["people", "voices"]} />}
           {view === "behavior" && (
             <>
-              {tauri && <UserSettingsPanel sections={["proactive"]} />}
+              {tauri && <UserSettingsPanel sections={["speech", "proactive"]} />}
               <ProductConfigurationPanel sections={["proactive"]} />
             </>
           )}

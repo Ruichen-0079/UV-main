@@ -248,6 +248,16 @@ export class DesktopSupervisor {
    * is tracked in the background so Save remains responsive.
    */
   async applyRuntimeConfig(update: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResult> {
+    if (this.baseEnv["YUVI_PORTABLE_VERSION"]) {
+      // Product configuration can select providers, but cannot retarget this
+      // launcher's local transport or filesystem ownership boundary.
+      const fixed = /^(SERVER_HOST|SERVER_PORT|MEM0_BASE_URL|LOCAL_STT_BASE_URL|LOCAL_TTS_BASE_URL|GPT_SOVITS_TTS_(BASE_URL|UPSTREAM_URL)|YUVI_PORTABLE_VERSION|YUVI_POSTGRES_.*|YUVI_.*(ROOT|DIR)|YUVI_SECRET_NAMESPACE|HOME|XDG_.*|DATABASE_URL)$/;
+      for (const [key, value] of Object.entries(update.env ?? {})) {
+        if (key !== "YUVI_POSTGRES_PASSWORD" && fixed.test(key) && value !== this.baseEnv[key]) {
+          throw new Error(`Portable isolation forbids changing ${key}.`);
+        }
+      }
+    }
     if (this.shuttingDown) {
       throw new Error("Supervisor is shutting down.");
     }
@@ -433,7 +443,7 @@ export class DesktopSupervisor {
   async bootstrap(): Promise<SupervisorSnapshot> {
     if (this.shuttingDown) return this.snapshot();
     if ((this.config.postgresMode ?? "external") === "private") {
-      await this.prepareAndStartPrivatePostgres();
+      await this.ensureService("postgres");
     } else {
       await this.refreshService("postgres");
     }
@@ -723,6 +733,12 @@ export class DesktopSupervisor {
     if (id === "local_stt") this.localSttManualSuspend = false;
     if (this.shuttingDown) return;
     await this.withConfigLock(async () => {
+      // The packaged attach path enters through /services/postgres/start,
+      // without bootstrap(). It needs the same private-cluster preparation.
+      if (id === "postgres" && this.config.postgresMode === "private") {
+        await this.prepareAndStartPrivatePostgres();
+        return;
+      }
       const svc = this.require(id);
       await this.queue(svc, async () => {
         await this.startManagedIfNeeded(id);
@@ -743,6 +759,7 @@ export class DesktopSupervisor {
     const svc = this.require(id);
     this.lifecycleEvent("memory.start.enter", svc);
     await this.refreshService(id);
+    if (this.baseEnv["YUVI_PORTABLE_VERSION"] && svc.ownership === "external") return;
     if (
       svc.status === "healthy" ||
       svc.status === "degraded" ||
@@ -1189,6 +1206,14 @@ export class DesktopSupervisor {
     });
 
     if (health.ok) {
+      if (this.baseEnv["YUVI_PORTABLE_VERSION"] && id !== "ollama" && !ownership.owned) {
+        svc.status = "unavailable";
+        svc.ownership = "external";
+        svc.pid = null;
+        svc.summary = "Portable endpoint belongs to an unowned process.";
+        svc.detail = "Portable isolation forbids adopting this service.";
+        return;
+      }
       svc.status = health.degraded ? "degraded" : "healthy";
       svc.summary = health.degraded
         ? "Running with reduced capabilities"
@@ -1384,7 +1409,8 @@ export class DesktopSupervisor {
       this.config.postgresListenPort = listen.port;
       this.rebuildSpecsInPlace();
       try {
-        await this.ensureService("postgres");
+        // The caller holds the config lock; do not recursively acquire it.
+        await this.queue(svc, () => this.startManagedIfNeeded("postgres"));
       } catch {
         // startManagedIfNeeded records lastError
       }

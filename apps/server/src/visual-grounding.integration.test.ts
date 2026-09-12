@@ -29,8 +29,8 @@ async function run(durableConversation: boolean) {
   });
   const responses = [
     '{"visualNeed":"Read the error dialog"}',
-    '{"disposition":"RESPOND","text":"SCREEN_FACT: permission denied."}',
-    '{"disposition":"RESPOND","text":"Hello again."}'
+    '{"disposition":"RESPOND"}',
+    '{"disposition":"RESPOND"}'
   ];
   const generateReply = vi.fn(async (_input: ChatInput) => ({
     message: { role: "assistant" as const, content: responses.shift()! },
@@ -39,6 +39,16 @@ async function run(durableConversation: boolean) {
   vi.spyOn(providers, "getChatProvider").mockReturnValue({
     name: "character",
     generateReply,
+    async *streamReply(input) {
+      const text =
+        input.messages[1]?.content === "Hello" ? "Hello again." : "SCREEN_FACT: permission denied.";
+      if (text.startsWith("SCREEN_FACT")) expect(JSON.stringify(input)).toContain("SCREEN_FACT");
+      yield { type: "text-delta", text };
+      yield {
+        type: "completed",
+        output: { message: { role: "assistant", content: text }, finishReason: "stop" }
+      };
+    },
     healthCheck: async () => ({ provider: "character", status: "healthy", checkedAt: "" })
   });
   const analyzeImage = vi.fn(async () => ({ text: "SCREEN_FACT: permission denied." }));
