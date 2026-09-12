@@ -659,6 +659,54 @@ describe("SpeechSegmenter punctuation conservation", () => {
   });
 });
 
+describe("SpeechSegmenter standalone punctuation conservation (A9-RV1)", () => {
+  const starvingAfterEachRelease = () => {
+    const state = { playing: false, synthesizing: false, playbackEnded: 0 };
+    return () => ({ ...state });
+  };
+  const makeCounting = () => {
+    const state = { playing: false, synthesizing: false, playbackEnded: 0 };
+    const segmenter = new SpeechSegmenter({ pipeline: () => ({ ...state }) });
+    const push = (text: string) => {
+      const got = segmenter.push(text);
+      state.playbackEnded += got.length;
+      return got;
+    };
+    return { segmenter, push };
+  };
+
+  it("conserves the second half of a —— pair after a starving cut at the first dash", () => {
+    const { push } = makeCounting();
+    const emitted: string[] = [];
+    emitted.push(...push("闪电亮起的那一瞬，屋子里的影子"));
+    emitted.push(...push("全都跳了起来—"));
+    // The starving cut releases the pending text ending with the first dash;
+    // the second dash then arrives with empty pending and must survive.
+    emitted.push(...push("—"));
+    emitted.push(...push("紧接着黑暗又压下来。"));
+    const strip = (value: string) => value.replace(/\s+/g, "");
+    const source = strip("闪电亮起的那一瞬，屋子里的影子全都跳了起来——紧接着黑暗又压下来。");
+    expect(strip(emitted.join(""))).toBe(source);
+  });
+
+  it("conserves a standalone comma delta arriving right after a release", () => {
+    const { push } = makeCounting();
+    const emitted: string[] = [];
+    emitted.push(...push("第一句话完整。"));
+    emitted.push(...push("，"));
+    emitted.push(...push("后续还有内容没有句号"));
+    emitted.push(...push("。"));
+    const strip = (value: string) => value.replace(/\s+/g, "");
+    expect(strip(emitted.join(""))).toBe(strip("第一句话完整。，后续还有内容没有句号。"));
+  });
+
+  it("never emits empty punctuation-only turns as speech", () => {
+    const { segmenter } = makeCounting();
+    expect(segmenter.push("—")).toEqual([]);
+    expect(segmenter.flush("cancelled")).toEqual([]);
+  });
+});
+
 describe("SpeechSegmenter delta-chunking equivalence", () => {
   const source = "早晨的市场很热闹。摊主们摆出新鲜的蔬菜，鱼贩大声吆喝着，孩子们追逐嬉戏。一切都充满生气。";
 

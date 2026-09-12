@@ -72,7 +72,10 @@ export class SpeechSegmenter {
     if (
       isSpeakableSpeechText(text) ||
       text.includes("\n") ||
-      (isSpeechPunctuation(text) && isSpeakableSpeechText(this.pending))
+      // Pure punctuation always accumulates: a segment release can consume
+      // pending right before the other half of a "——" pair (or any standalone
+      // punctuation) arrives, and dropping it would silently lose source text.
+      isSpeechPunctuation(text)
     ) {
       this.pending = joinSpeechText(this.pending, text);
     }
