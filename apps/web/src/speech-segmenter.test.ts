@@ -780,3 +780,57 @@ describe("SpeechSegmenter delta-chunking equivalence", () => {
     }
   });
 });
+
+
+describe("post-GLM conservation audit", () => {
+  it.each(["。", "……", "！？", "— —", "，"])("retains standalone %s before the next spoken body", (punctuation) => {
+    const segmenter = new SpeechSegmenter();
+    const emitted = segmenter.push("第一句话完整。");
+    for (const delta of Array.from(punctuation)) emitted.push(...segmenter.push(delta));
+    emitted.push(...segmenter.push("后面的内容也要保留。"), ...segmenter.flush("completed"));
+    expect(emitted.join("").replace(/\s/g, "")).toBe(("第一句话完整。" + punctuation + "后面的内容也要保留。").replace(/\s/g, ""));
+  });
+
+  it("does not release another starving fragment when this delta already supplied work", () => {
+    const state = { playing: false, synthesizing: false, playbackEnded: 1 };
+    const segmenter = new SpeechSegmenter({ pipeline: () => state });
+    segmenter.push("第一句话完整。");
+    expect(segmenter.push("第二句话完整。后面这段还没说完，继续")).toEqual(["第二句话完整。"]);
+  });
+});
+
+
+it("sanitizes emoji even when the provider splits its surrogate pair beside speech", () => {
+  const segmenter = new SpeechSegmenter();
+  const emitted = [
+    ...segmenter.push("甲\ud83d"),
+    ...segmenter.push("\ude42乙。"),
+    ...segmenter.flush("completed")
+  ];
+  expect(emitted.join("").replace(/\s/g, "")).toBe("甲乙。");
+});
+
+
+it.each([
+  ["数值是3.", "14以及1,", "000。"],
+  ["请看https://example.", "com/path?a=1&b=2。"],
+  ["例如e.", "g. U.", "S. Dr.", " Smith。"],
+  ["中文与Latin，", "混合punctuation！？", "继续。"],
+  ["前面的内容—", "—", "后面的内容。"]
+])("conserves non-whitespace speech characters across numeric and mixed boundaries: %j", (...deltas) => {
+  const segmenter = new SpeechSegmenter();
+  const emitted = deltas.flatMap(delta => segmenter.push(delta));
+  emitted.push(...segmenter.flush("completed"));
+  const compact = (text: string) => prepareSpeechSegment(text).replace(/\s/g, "");
+  expect(compact(emitted.join(""))).toBe(compact(deltas.join("")));
+  expect(segmenter.flush("completed")).toEqual([]);
+});
+
+it("drops cancelled text and a held surrogate before the next turn", () => {
+  const segmenter = new SpeechSegmenter();
+  segmenter.push("被取消的内容\ud83d");
+  expect(segmenter.flush("cancelled")).toEqual([]);
+  expect(segmenter.flush("completed")).toEqual([]);
+  segmenter.reset();
+  expect(segmenter.push("新的回复完整。")).toEqual(["新的回复完整。"]);
+});

@@ -303,7 +303,12 @@ export function ChatPage(): JSX.Element {
       lumiRef.current?.resumeAudio();
       const generation = requestId;
       const feedback = createSpeechPipelineFeedback();
-      const segmenter = new SpeechSegmenter({ pipeline: () => feedback });
+      const segmenter = new SpeechSegmenter({
+        pipeline: () => {
+          const session = speechSessionRef.current;
+          return session?.generation === generation ? session.feedback : undefined;
+        }
+      });
       const queue = new SpeechPlaybackQueue(
         (item, signal) =>
           apiClient.synthesizeSpeech({

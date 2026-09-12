@@ -54,6 +54,7 @@ type BoundaryKind = "strong" | "starving-soft" | "emergency";
  */
 export class SpeechSegmenter {
   private pending = "";
+  private pendingSurrogate = "";
   private readonly minChars: number;
   private readonly maxChars: number;
   private readonly pipeline: (() => SpeechPipelineSnapshot | undefined) | null;
@@ -68,7 +69,12 @@ export class SpeechSegmenter {
   }
 
   push(markdownDelta: string): string[] {
-    const text = sanitizeSpeechText(speechTextFromMarkdown(markdownDelta));
+    // A provider frame may end between UTF-16 code units. Rejoin before
+    // normalization so emoji cannot escape sanitation as two lone surrogates.
+    let delta = this.pendingSurrogate + markdownDelta;
+    this.pendingSurrogate = /[\uD800-\uDBFF]$/.test(delta) ? delta.slice(-1) : "";
+    if (this.pendingSurrogate) delta = delta.slice(0, -1);
+    const text = sanitizeSpeechText(speechTextFromMarkdown(delta));
     if (
       isSpeakableSpeechText(text) ||
       text.includes("\n") ||
@@ -83,6 +89,7 @@ export class SpeechSegmenter {
   }
 
   flush(reason: SpeechFlushReason): string[] {
+    this.pendingSurrogate = "";
     const value = this.pending.trim();
     this.pending = "";
     if (!isSpeakableSpeechText(value)) return [];
@@ -97,6 +104,7 @@ export class SpeechSegmenter {
 
   reset(): void {
     this.pending = "";
+    this.pendingSurrogate = "";
     this.released = 0;
   }
 
@@ -128,7 +136,7 @@ export class SpeechSegmenter {
       this.pending.length > 0 &&
       (this.pending.length >= this.minChars || force || hasNaturalBoundary(this.pending))
     ) {
-      const starving = this.isStarving();
+      const starving = cuts.length === 0 && this.isStarving();
       const boundary = findBoundary(this.pending, this.minChars, this.maxChars, force, starving);
       if (boundary.index < 0) break;
       let kind: BoundaryKind | "final" | "first" | "first-merged" = boundary.kind;
@@ -226,6 +234,9 @@ function findBoundary(
   // short openers such as "Hello." are not held behind minChars.
   for (let index = 0; index < limit; index += 1) {
     const char = value[index] ?? "";
+    // A leading punctuation fragment belongs to the next speakable body;
+    // consuming it on its own would drop a provider delta after a release.
+    if (!isSpeakableSpeechText(value.slice(0, index + 1))) continue;
     if ("。！？!?…".includes(char)) return { index: index + 1, kind: "strong" };
     if (char === "\n" && index > 0) return { index: index + 1, kind: "strong" };
     if (char === "." && isEnglishSentenceEnd(value, index)) {

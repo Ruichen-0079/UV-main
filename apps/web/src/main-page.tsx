@@ -551,7 +551,12 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
     const feedback = createSpeechPipelineFeedback();
-    const segmenter = new SpeechSegmenter({ pipeline: () => feedback });
+    const segmenter = new SpeechSegmenter({
+      pipeline: () => {
+        const session = speechSessionRef.current;
+        return session?.generation === requestId ? session.feedback : undefined;
+      }
+    });
     // Speech segmentation doubles as the committed subtitle feed: always keep
     // a session so speak segments reach Companion even when TTS audio is off.
     // Only the playback admission remains TTS-gated.
@@ -1065,7 +1070,12 @@ export function MainPage(): JSX.Element {
     const feedback = createSpeechPipelineFeedback();
     speechSessionRef.current = {
       generation: requestId,
-      segmenter: new SpeechSegmenter({ pipeline: () => feedback }),
+      segmenter: new SpeechSegmenter({
+        pipeline: () => {
+          const session = speechSessionRef.current;
+          return session?.generation === requestId ? session.feedback : undefined;
+        }
+      }),
       sequence: 0,
       ended: false,
       feedback
