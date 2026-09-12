@@ -1,3 +1,5 @@
+import { getSpeechAudioData } from "./speech-queue.js";
+
 export type MouthEnvelopeConfig = {
   noiseGate: number;
   gain: number;
@@ -57,51 +59,27 @@ export type AudioEnvelopeHost = {
   dispose(): void;
 };
 
-type AudioContextLike = {
-  createMediaElementSource(audio: HTMLAudioElement): {
-    connect(destination: unknown): void;
-    disconnect(): void;
-  };
-  createAnalyser(): {
-    fftSize: number;
-    connect(destination: unknown): void;
-    disconnect(): void;
-    getByteTimeDomainData(target: Uint8Array): void;
-  };
-  destination: unknown;
-  state?: string;
-  resume?(): Promise<void>;
-  close?(): Promise<void>;
-};
-
-type AudioContextFactory = () => AudioContextLike;
+type AudioDecoder = Pick<OfflineAudioContext, "decodeAudioData">;
+type AudioContextFactory = () => AudioDecoder;
 
 /**
- * Drives Lumi's mouth only from the audio element that is currently playing.
- * The controller owns one AudioContext for its lifetime and never infers
- * articulation from the text stream or the synthesis queue.
+ * Passive lip-sync: decode a copy of the synthesized bytes and sample it at
+ * the playing element's media time. Never bind a MediaElementSource: doing so
+ * takes ownership of audible output, and WebKitGTK can skip buffered speech
+ * when that binding happens after play(). Decoder failure only loses lip-sync.
  */
 export class AudioMouthEnvelope implements AudioEnvelopeHost {
-  private readonly context: AudioContextLike | null;
-  private analyser: ReturnType<AudioContextLike["createAnalyser"]> | null = null;
-  private source: ReturnType<AudioContextLike["createMediaElementSource"]> | null = null;
-  private sourceConnected = false;
-  private readonly sources = new WeakMap<HTMLAudioElement, ReturnType<AudioContextLike["createMediaElementSource"]>>();
+  private readonly decoder: AudioDecoder | null;
+  private buffer: AudioBuffer | null = null;
   private attachedAudio: HTMLAudioElement | null = null;
-  private samples = new Uint8Array(1024);
+  private playing = false;
+  private generation = 0;
   private animationFrame: number | null = null;
   private previousTime: number | null = null;
   private value = 0;
   private disposed = false;
-  private debugAudioId: number | null = null;
-  private debugLastReportedAt = 0;
-  private debugRawMin = Number.POSITIVE_INFINITY;
-  private debugRawMax = 0;
-  private debugMouthMin = Number.POSITIVE_INFINITY;
-  private debugMouthMax = 0;
   private readonly visibilityHandler = () => {
-    if (typeof document === "undefined") return;
-    if (document.hidden) this.stop();
+    if (document.hidden) this.clearFrame();
     else this.startLoop();
   };
 
@@ -111,224 +89,113 @@ export class AudioMouthEnvelope implements AudioEnvelopeHost {
     factory: AudioContextFactory = defaultAudioContextFactory
   ) {
     try {
-      this.context = typeof window === "undefined" ? null : factory();
+      this.decoder = typeof window === "undefined" ? null : factory();
     } catch {
-      this.context = null;
+      this.decoder = null;
     }
-    // Lip-sync owns ParamMouthOpenY only. ParamMouthForm is reserved for
-    // expression (e.g. soft-smile); do not neutralize it on construct.
     if (typeof document !== "undefined") {
       document.addEventListener?.("visibilitychange", this.visibilityHandler);
     }
-    this.publishDebug({ context: this.context ? "created" : "unavailable" });
   }
 
   attach(audio: HTMLAudioElement): void {
-    if (this.disposed || !this.context) return;
+    if (this.disposed) return;
     this.detach();
+    this.attachedAudio = audio;
+    const generation = this.generation;
+    const data = getSpeechAudioData(audio);
+    if (!this.decoder || !data) return;
     try {
-      this.attachedAudio = audio;
-      this.debugAudioId = getSpeechAudioDebugId(audio);
-      // Do not create a MediaElementSource until the audio context has
-      // actually resumed. Creating one immediately reroutes the element's
-      // native output through a suspended context; if resume is rejected,
-      // the HTMLAudioElement still reports a successful play but is silent.
-      // Keeping the element untouched until playback starts preserves the
-      // native output fallback.
-      this.source = null;
-      this.analyser ??= this.context.createAnalyser();
-      this.analyser.fftSize = 1024;
-      this.previousTime = null;
-      // Do not connect the media element to a possibly suspended AudioContext
-      // before playback starts. A suspended analyser graph would otherwise
-      // reroute the audio into silence and make the user hear nothing.
-      this.sourceConnected = false;
-      this.publishDebug({ attached: true, sourceBound: false });
-    } catch {
-      this.stop();
-    }
-  }
-
-  /** Resume the shared context from the user's gesture before TTS resolves. */
-  resume(): void {
-    if (this.disposed || !this.context) return;
-    const resumeResult = this.context.resume?.();
-    if (resumeResult) {
-      void resumeResult.then(
-        () => this.publishDebug({ resume: "resolved" }),
-        () => this.publishDebug({ resume: "rejected" })
-      );
-    }
-  }
-
-  /** Start sampling only after the corresponding HTMLAudioElement is playing. */
-  startPlayback(audio: HTMLAudioElement): void {
-    if (this.disposed || !this.context || this.attachedAudio !== audio || !this.analyser) {
-      return;
-    }
-    this.previousTime = null;
-    this.resetDebugRange();
-    const connectSource = () => {
-      if (
-        this.disposed ||
-        this.attachedAudio !== audio ||
-        !this.analyser ||
-        this.sourceConnected
-      ) {
-        return;
-      }
-      try {
-        this.source =
-          this.sources.get(audio) ?? this.context!.createMediaElementSource(audio);
-        this.sources.set(audio, this.source);
-        this.source.connect(this.analyser);
-        this.analyser.connect(this.context!.destination);
-        this.sourceConnected = true;
-        this.publishDebug({ sourceBound: true });
-      } catch {
-        // Keep the native HTMLAudioElement path audible if Web Audio cannot
-        // be resumed/bound in the current WebView.
-        this.sourceConnected = false;
-        this.publishDebug({ sourceBound: false });
-      }
-    };
-    const resumeResult = this.context.resume?.();
-    if (resumeResult) {
-      void resumeResult.then(
-        () => {
-          if (!this.disposed && this.attachedAudio === audio) {
-            connectSource();
-            this.startLoop();
-          }
-          this.publishDebug({ resume: "resolved" });
+      // decodeAudioData detaches its argument; pass a private copy so the
+      // player-owned bytes and the blob URL cannot be transferred.
+      void this.decoder.decodeAudioData(data.slice(0)).then(
+        (buffer) => {
+          if (this.disposed || generation !== this.generation || this.attachedAudio !== audio) return;
+          this.buffer = buffer;
+          this.startLoop();
         },
-        () => {
-          this.publishDebug({ resume: "rejected" });
-          // Audio playback must not be blocked when analysis cannot resume;
-          // leave the media element disconnected so native playback remains.
-        }
+        () => { /* Analysis is optional; native speech remains untouched. */ }
       );
-    } else {
-      connectSource();
-      this.startLoop();
+    } catch {
+      // Some WebViews reject decoding synchronously. Playback still owns audio.
     }
+  }
+
+  startPlayback(audio: HTMLAudioElement): void {
+    if (this.disposed || this.attachedAudio !== audio) return;
+    this.playing = true;
+    this.startLoop();
   }
 
   detach(): void {
+    this.generation += 1;
     this.stop();
-    try {
-      this.source?.disconnect();
-      this.analyser?.disconnect();
-    } catch {
-      // Browser audio nodes can already be disconnected during page teardown.
-    }
-    this.source = null;
-    this.sourceConnected = false;
+    this.buffer = null;
     this.attachedAudio = null;
-    this.debugAudioId = null;
-    this.publishDebug({ attached: false, sourceBound: false });
   }
 
   stop(): void {
+    this.playing = false;
+    this.clearFrame();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.detach();
+    if (typeof document !== "undefined") {
+      document.removeEventListener?.("visibilitychange", this.visibilityHandler);
+    }
+  }
+
+  private clearFrame(): void {
     if (this.animationFrame !== null && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(this.animationFrame);
     }
     this.animationFrame = null;
     this.previousTime = null;
     this.value = 0;
-    // Clear open only — resetMouth() would also zero ParamMouthForm and
-    // clobber an active soft-smile / expression.
+    // ParamMouthForm belongs to expression, including during terminal cleanup.
     this.target.setMouthOpen(0);
-    this.publishDebug({ mouth: 0 });
-  }
-
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    if (typeof document !== "undefined") {
-      document.removeEventListener?.("visibilitychange", this.visibilityHandler);
-    }
-    this.detach();
-    void this.context?.close?.();
   }
 
   private startLoop(): void {
-    if (
-      this.animationFrame !== null ||
-      !this.analyser ||
-      typeof requestAnimationFrame !== "function"
-    ) {
-      return;
-    }
+    if (this.disposed || !this.playing || !this.buffer || this.animationFrame !== null ||
+        typeof requestAnimationFrame !== "function" ||
+        (typeof document !== "undefined" && document.hidden)) return;
     const frame = (time: number) => {
       this.animationFrame = null;
-      if (this.disposed || !this.analyser) return;
+      const audio = this.attachedAudio;
+      const buffer = this.buffer;
+      if (this.disposed || !this.playing || !audio || !buffer) return;
       if (typeof document !== "undefined" && document.hidden) {
-        this.stop();
+        this.clearFrame();
         return;
       }
-      const deltaSeconds =
-        this.previousTime === null
-          ? 1 / 60
-          : Math.min(0.1, Math.max(0, (time - this.previousTime) / 1000));
+      const deltaSeconds = this.previousTime === null ? 1 / 60
+        : Math.min(0.1, Math.max(0, (time - this.previousTime) / 1000));
       this.previousTime = time;
-      this.analyser.getByteTimeDomainData(this.samples);
-      const rawRms = rmsFromTimeDomain(this.samples);
-      const target = gatedEnvelope(rawRms, this.config);
-      this.value = smoothMouthEnvelope(this.value, target, deltaSeconds, this.config);
+      if (audio.paused || audio.ended || audio.muted || audio.readyState < 3) {
+        this.value = 0;
+      } else {
+        const end = Math.min(buffer.length, Math.max(0, Math.floor(audio.currentTime * buffer.sampleRate)));
+        const start = Math.max(0, end - 1024);
+        let sum = 0;
+        for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+          const samples = buffer.getChannelData(channel);
+          for (let index = start; index < end; index += 1) sum += (samples[index] ?? 0) ** 2;
+        }
+        const count = (end - start) * buffer.numberOfChannels;
+        const rms = count > 0 ? Math.sqrt(sum / count) * audio.volume : 0;
+        this.value = smoothMouthEnvelope(this.value, gatedEnvelope(rms, this.config), deltaSeconds, this.config);
+      }
       this.target.setMouthOpen(this.value);
-      this.debugRawMin = Math.min(this.debugRawMin, rawRms);
-      this.debugRawMax = Math.max(this.debugRawMax, rawRms);
-      this.debugMouthMin = Math.min(this.debugMouthMin, this.value);
-      this.debugMouthMax = Math.max(this.debugMouthMax, this.value);
-      this.publishDebug({ rawRms, gatedRms: target, mouth: this.value });
       this.animationFrame = requestAnimationFrame(frame);
     };
     this.animationFrame = requestAnimationFrame(frame);
   }
-
-  private resetDebugRange(): void {
-    this.debugRawMin = Number.POSITIVE_INFINITY;
-    this.debugRawMax = 0;
-    this.debugMouthMin = Number.POSITIVE_INFINITY;
-    this.debugMouthMax = 0;
-  }
-
-  private publishDebug(values: Record<string, unknown>): void {
-    if (!import.meta.env.DEV || typeof document === "undefined") return;
-    const now = typeof performance === "undefined" ? 0 : performance.now();
-    if (
-      now - this.debugLastReportedAt < 1000 &&
-      values["resume"] === undefined &&
-      values["attached"] === undefined
-    ) {
-      return;
-    }
-    this.debugLastReportedAt = now;
-    const audio = this.attachedAudio;
-    document.documentElement.dataset["yuviLumiAudio"] = JSON.stringify({
-      audioId: this.debugAudioId,
-      contextState: this.context?.state ?? "unknown",
-      audioPaused: audio?.paused ?? true,
-      currentTime: audio?.currentTime ?? 0,
-      volume: audio?.volume ?? 0,
-      analyserBound: this.analyser !== null,
-      sourceBound: this.sourceConnected,
-      rawRmsMin: Number.isFinite(this.debugRawMin) ? this.debugRawMin : 0,
-      rawRmsMax: this.debugRawMax,
-      mouthMin: Number.isFinite(this.debugMouthMin) ? this.debugMouthMin : 0,
-      mouthMax: this.debugMouthMax,
-      ...values
-    });
-  }
 }
 
-function defaultAudioContextFactory(): AudioContextLike {
-  const AudioContextConstructor =
-    globalThis.AudioContext ??
-    (globalThis as typeof globalThis & { webkitAudioContext?: typeof AudioContext })
-      .webkitAudioContext;
-  if (!AudioContextConstructor) throw new Error("Web Audio is unavailable.");
-  return new AudioContextConstructor() as unknown as AudioContextLike;
+function defaultAudioContextFactory(): AudioDecoder {
+  // Offline decoding has no connection to a speaker or to the media element.
+  return new OfflineAudioContext(1, 1, 48000);
 }
-import { getSpeechAudioDebugId } from "./speech-queue.js";
