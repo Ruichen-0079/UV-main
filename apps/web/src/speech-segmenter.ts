@@ -40,6 +40,11 @@ type BoundaryKind = "strong" | "starving-soft" | "emergency";
 /**
  * Incremental speech segmenter — the single speech segmentation authority.
  *
+ * Conservation is of prepared speakable content, not byte-exact concatenation
+ * of raw committed Markdown. Deltas accumulate as contiguous source, then
+ * sanitize/prepare may normalize segment-boundary whitespace. Speakable
+ * letters, digits and punctuation must not be missing or duplicated.
+ *
  * - Does not finalize sanitize on every SSE delta alone; pending accumulates.
  * - Consumed body is sliced away so it is never re-emitted.
  * - completed flushes the remaining tail once.
@@ -54,7 +59,9 @@ type BoundaryKind = "strong" | "starving-soft" | "emergency";
  */
 export class SpeechSegmenter {
   private pending = "";
-  private pendingSurrogate = "";
+  private markdown = "";
+  private consumed = 0;
+  private finished = false;
   private readonly minChars: number;
   private readonly maxChars: number;
   private readonly pipeline: (() => SpeechPipelineSnapshot | undefined) | null;
@@ -69,42 +76,41 @@ export class SpeechSegmenter {
   }
 
   push(markdownDelta: string): string[] {
-    // A provider frame may end between UTF-16 code units. Rejoin before
-    // normalization so emoji cannot escape sanitation as two lone surrogates.
-    let delta = this.pendingSurrogate + markdownDelta;
-    this.pendingSurrogate = /[\uD800-\uDBFF]$/.test(delta) ? delta.slice(-1) : "";
-    if (this.pendingSurrogate) delta = delta.slice(0, -1);
-    const text = sanitizeSpeechText(speechTextFromMarkdown(delta));
-    if (
-      isSpeakableSpeechText(text) ||
-      text.includes("\n") ||
-      // Pure punctuation always accumulates: a segment release can consume
-      // pending right before the other half of a "——" pair (or any standalone
-      // punctuation) arrives, and dropping it would silently lose source text.
-      isSpeechPunctuation(text)
-    ) {
-      this.pending = joinSpeechText(this.pending, text);
-    }
+    if (this.finished) return [];
+    // Deltas are contiguous substrings, not words. Normalize the accumulated
+    // Markdown so whitespace, split formatting, punctuation and UTF-16 pairs
+    // have the same meaning regardless of the provider's frame boundaries.
+    this.markdown += markdownDelta;
+    this.project(false);
     return this.drain(false);
   }
 
   flush(reason: SpeechFlushReason): string[] {
-    this.pendingSurrogate = "";
-    const value = this.pending.trim();
-    this.pending = "";
-    if (!isSpeakableSpeechText(value)) return [];
-    if (reason !== "completed" && !/[。！？!?…\.]\s*$/.test(value)) return [];
-    // completed is the only point where an unfinished tail is guaranteed to
-    // be final. Drain it through the same maxChars / safe-boundary logic as
-    // incremental deltas so a long response cannot become one oversized TTS
-    // request merely because its final punctuation arrived in a later frame.
-    this.pending = value;
+    if (this.finished) return [];
+    this.finished = true;
+    this.project(true);
+    if (reason === "cancelled") {
+      this.pending = "";
+      return [];
+    }
+    if (reason === "failed" && !/[。！？!?…\.]\s*$/.test(this.pending)) {
+      this.pending = "";
+      return [];
+    }
     return this.drain(true);
+  }
+
+  private project(final: boolean): void {
+    const markdown = final ? this.markdown : stableMarkdownPrefix(this.markdown);
+    const normalized = sanitizeSpeechText(speechTextFromMarkdown(markdown));
+    this.pending = normalized.slice(this.consumed);
   }
 
   reset(): void {
     this.pending = "";
-    this.pendingSurrogate = "";
+    this.markdown = "";
+    this.consumed = 0;
+    this.finished = false;
     this.released = 0;
   }
 
@@ -141,6 +147,10 @@ export class SpeechSegmenter {
       if (boundary.index < 0) break;
       let kind: BoundaryKind | "final" | "first" | "first-merged" = boundary.kind;
       let end = boundary.index;
+      if (!isSpeakableSpeechText(this.pending.slice(end))) {
+        if (!force) break;
+        end = this.pending.length;
+      }
       if (force && end >= this.pending.length) {
         kind = "final";
       } else if (kind === "strong" && this.released + cuts.length === 0) {
@@ -152,7 +162,8 @@ export class SpeechSegmenter {
       if (isSpeakableSpeechText(segment)) {
         cuts.push({ segment, reason: releaseReason(kind) });
       }
-      this.pending = this.pending.slice(end).trimStart();
+      this.consumed += end;
+      this.pending = this.pending.slice(end);
     }
     const emitted: string[] = [];
     for (const cut of cuts) {
@@ -237,10 +248,10 @@ function findBoundary(
     // A leading punctuation fragment belongs to the next speakable body;
     // consuming it on its own would drop a provider delta after a release.
     if (!isSpeakableSpeechText(value.slice(0, index + 1))) continue;
-    if ("。！？!?…".includes(char)) return { index: index + 1, kind: "strong" };
-    if (char === "\n" && index > 0) return { index: index + 1, kind: "strong" };
+    if ("。！？!?…".includes(char)) return strongBoundary(value, index + 1, force);
+    if (char === "\n" && index > 0) return strongBoundary(value, index + 1, force);
     if (char === "." && isEnglishSentenceEnd(value, index)) {
-      return { index: index + 1, kind: "strong" };
+      return strongBoundary(value, index + 1, force);
     }
   }
 
@@ -301,26 +312,39 @@ function isEnglishSentenceEnd(value: string, index: number): boolean {
   return true;
 }
 
-function joinSpeechText(left: string, right: string): string {
-  if (!left) return right;
-  if (!right) return left;
-  if (left.endsWith("\n") || right.startsWith("\n")) return `${left}${right}`;
-  if (/^[\u3040-\u30ff\u3400-\u9fff]/.test(right) && /[\u3040-\u30ff\u3400-\u9fff]$/.test(left)) {
-    return left + right;
-  }
-  // Preserve English contractions across deltas: "I" + "'m" → "I'm"
-  if (/^['']/.test(right) || /['']$/.test(left)) {
-    return left + right;
-  }
-  // Attach pure punctuation without inserting a space.
-  if (/^[。！？!?…,.;:，、；—–]+$/.test(right)) {
-    return left + right;
-  }
-  return `${left} ${right}`;
+/** A terminal punctuation run belongs to its sentence, even across deltas. */
+function strongBoundary(value: string, index: number, force: boolean): { index: number; kind: "strong" } {
+  let end = index;
+  while (end < value.length && /[\p{P}\p{Z}\s]/u.test(value[end] ?? "")) end += 1;
+  // One textual lookahead (or final flush), never a timer. Otherwise a late
+  // punctuation-only delta cannot be added to an already-submitted request.
+  if (!force && !isSpeakableSpeechText(value.slice(end))) return { index: -1, kind: "strong" };
+  // Leave whitespace pending; final segment preparation trims it, and it may
+  // still be extended by the next provider frame.
+  return { index: value.slice(0, end).trimEnd().length, kind: "strong" };
 }
 
-function isSpeechPunctuation(value: string): boolean {
-  return /^[。！？!?…；;,.，、—–]+$/.test(value);
+/** Hold incomplete inline Markdown whose completion could rewrite speech. */
+function stableMarkdownPrefix(markdown: string): string {
+  let end = markdown.length;
+  if (/[\uD800-\uDBFF]$/.test(markdown)) end -= 1;
+  const brackets: number[] = [];
+  for (let index = 0; index < end; index += 1) {
+    if (markdown[index] === "[" && markdown[index - 1] !== "\\") brackets.push(index);
+    if (markdown[index] === "]" && brackets.length) {
+      const open = brackets.pop()!;
+      if (index + 1 === end) return markdown.slice(0, open);
+      if (markdown[index + 1] === "(") {
+        const close = markdown.indexOf(")", index + 2);
+        if (close < 0) return markdown.slice(0, open);
+        index = close;
+      }
+    }
+  }
+  if (brackets.length) end = Math.min(end, brackets[0]!);
+  const tag = markdown.lastIndexOf("<", end - 1);
+  if (tag >= 0 && markdown.indexOf(">", tag) < 0) end = Math.min(end, tag);
+  return markdown.slice(0, end);
 }
 
 function hasNaturalBoundary(value: string): boolean {

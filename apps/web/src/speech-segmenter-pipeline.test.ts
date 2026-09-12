@@ -129,6 +129,8 @@ describe("speech segmentation pipeline", () => {
   it("keeps S1/S2/S3 strictly ordered and synthesizes one at a time", async () => {
     const harness = makeHarness();
     harness.segmenter.push("第一句话。第二句话。第三句话。");
+    harness.segmenter.flush("completed");
+    harness.queue.finish();
     expect(harness.speaks.map((speak) => speak.sequence)).toEqual([0, 1, 2]);
     await Promise.resolve();
     await Promise.resolve();
@@ -211,11 +213,11 @@ describe("speech segmentation pipeline", () => {
 
   it("does not leak pending text after cancellation", async () => {
     const harness = makeHarness();
-    harness.segmenter.push("完整的第一句。");
+    harness.segmenter.push("完整的第一句。被");
     await Promise.resolve();
     expect(harness.speaks.length).toBe(1);
 
-    harness.segmenter.push("被取消的残尾没有任何标点");
+    harness.segmenter.push("取消的残尾没有任何标点");
     harness.segmenter.flush("cancelled");
     harness.queue.cancel();
     for (let i = 0; i < 6; i += 1) await Promise.resolve();
