@@ -34,6 +34,11 @@ import { ChatMessageContent } from "./markdown-message.js";
 import { detectSpeechLanguage, type SpeechQueueState } from "./speech-queue.js";
 import { SpeechSegmenter } from "./speech-segmenter.js";
 import {
+  createSpeechPipelineFeedback,
+  reduceSpeechPipelineFeedback,
+  type SpeechPipelineFeedback
+} from "./speech-pipeline-feedback.js";
+import {
   CompanionBus,
   type CompanionBusMessage,
   type CompanionPlaybackState,
@@ -162,6 +167,7 @@ export function MainPage(): JSX.Element {
     segmenter: SpeechSegmenter;
     sequence: number;
     ended: boolean;
+    feedback: SpeechPipelineFeedback;
   } | null>(null);
   const speechEpochRef = useRef<string | null>(null);
   const playbackCorrelationRef = useRef<SpeechPlaybackCorrelationState>(
@@ -356,6 +362,13 @@ export function MainPage(): JSX.Element {
         bus.post({ kind: "tts-config", config: ttsConfigRef.current });
       } else if (message.kind === "speech-status") {
         if (speechEpochRef.current !== message.requestId) return;
+        const session = speechSessionRef.current;
+        if (session && session.generation === message.requestId) {
+          session.feedback = reduceSpeechPipelineFeedback(session.feedback, {
+            type: "queue-state",
+            state: message.state
+          });
+        }
         setVoicePlaybackStatus(message.state);
         if (message.state === "idle" || message.state === "stopped") {
           speechEpochRef.current = null;
@@ -377,6 +390,14 @@ export function MainPage(): JSX.Element {
         );
         playbackCorrelationRef.current = result.state;
         if (!result.accepted) return;
+        if (message.state === "ended") {
+          const session = speechSessionRef.current;
+          if (session && session.generation === message.requestId) {
+            session.feedback = reduceSpeechPipelineFeedback(session.feedback, {
+              type: "playback-ended"
+            });
+          }
+        }
         applyPlaybackStatus(message.state, setVoicePlaybackStatus, setActualPlaybackActive);
         if (message.state === "started") {
           reportPlaybackOutcome(message.requestId, "STARTED");
@@ -529,11 +550,18 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "user-gesture" });
     bus?.post({ kind: "voice-enabled", enabled: true });
     bus?.post({ kind: "start-generation", requestId, sessionId });
-    const segmenter = new SpeechSegmenter();
+    const feedback = createSpeechPipelineFeedback();
+    const segmenter = new SpeechSegmenter({ pipeline: () => feedback });
     // Speech segmentation doubles as the committed subtitle feed: always keep
     // a session so speak segments reach Companion even when TTS audio is off.
     // Only the playback admission remains TTS-gated.
-    speechSessionRef.current = { generation: requestId, segmenter, sequence: 0, ended: false };
+    speechSessionRef.current = {
+      generation: requestId,
+      segmenter,
+      sequence: 0,
+      ended: false,
+      feedback
+    };
     if (shouldRequestTts) {
       void apiClient
         .admitSpeechPlayback({ sessionId, requestId })
@@ -1034,11 +1062,13 @@ export function MainPage(): JSX.Element {
     bus?.post({ kind: "start-generation", requestId, sessionId });
     // Same committed-text authority as the user path: segmentation feeds
     // Subtitle via Companion even when TTS audio is off.
+    const feedback = createSpeechPipelineFeedback();
     speechSessionRef.current = {
       generation: requestId,
-      segmenter: new SpeechSegmenter(),
+      segmenter: new SpeechSegmenter({ pipeline: () => feedback }),
       sequence: 0,
-      ended: false
+      ended: false,
+      feedback
     };
     if (shouldRequestTts) {
       void apiClient
