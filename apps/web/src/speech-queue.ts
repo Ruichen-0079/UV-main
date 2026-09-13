@@ -64,6 +64,17 @@ export type SpeechPlayerLifecycle = {
 
 let nextSpeechAudioDebugId = 1;
 const speechAudioDebugIds = new WeakMap<HTMLAudioElement, number>();
+const speechAudioData = new WeakMap<HTMLAudioElement, Uint8Array>();
+
+/**
+ * Ownership boundary: lip-sync may observe a copy of synthesized bytes.
+ * Do not share the playback ArrayBuffer or Blob backing store as an
+ * optimization — decodeAudioData detaches its argument, and observers must
+ * never be able to mutate or reroute audible output.
+ */
+export function getSpeechAudioData(audio: HTMLAudioElement): ArrayBuffer | null {
+  return speechAudioData.get(audio)?.slice().buffer ?? null;
+}
 
 /** Development-only identity for correlating queue, playback and analyser logs. */
 export function getSpeechAudioDebugId(audio: HTMLAudioElement): number {
@@ -257,8 +268,14 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
         return;
       }
       const bytes = Uint8Array.from(atob(output.audioBase64), (char) => char.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: output.mimeType || "audio/wav" }));
+      const playbackBytes = bytes.slice();
+      const url = URL.createObjectURL(
+        new Blob([playbackBytes], { type: output.mimeType || "audio/wav" })
+      );
       const audio = new Audio(url);
+      // Separate copy from the blob URL above. This is an ownership
+      // boundary, not a cache: lip-sync must not share mutable playback data.
+      speechAudioData.set(audio, bytes.slice());
       // Keep a real media element in the companion document. This makes the
       // WebView2 output path deterministic and gives us an explicit cleanup
       // point; the element stays hidden and never shows native controls.
@@ -275,6 +292,7 @@ export function createBrowserSpeechPlayer(): SpeechPlayer {
       current = audio;
       let settled = false;
       const cleanup = () => {
+        speechAudioData.delete(audio);
         URL.revokeObjectURL(url);
         audio.onended = null;
         audio.onerror = null;

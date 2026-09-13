@@ -79,7 +79,7 @@ export function prepareSpeechSegment(text: string): string {
     .replace(/[ \t]+/g, " ")
     // Strip only leading/trailing whitespace and orphaned ornaments — keep
     // sentence-ending punctuation such as "." "!" "?" "。" intact.
-    .replace(/^[\s、•]+|[\s、•]+$/g, "")
+    .replace(/^[\s•]+|[\s•]+$/g, "")
     .trim();
 }
 

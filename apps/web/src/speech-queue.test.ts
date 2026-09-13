@@ -410,3 +410,145 @@ it("keeps an open stream alive between speech segments", async () => {
   await vi.waitFor(() => expect(onState).toHaveBeenCalledWith("idle"));
   expect(play).toHaveBeenCalledTimes(2);
 });
+
+it("finish seals input while active synthesis and buffered FIFO playback drain completely", async () => {
+  const resolvers: Array<() => void> = [];
+  const states = new Map<number, string>();
+  const played: string[] = [];
+  let finishFirst!: () => void;
+  const queueStates: string[] = [];
+  const queue = new SpeechPlaybackQueue(
+    (item) => new Promise((resolve) => resolvers.push(() => resolve({ audioBase64: item.text, mimeType: "audio/wav" } as never))),
+    async (output) => {
+      played.push(output.audioBase64);
+      if (played.length === 1) await new Promise<void>((resolve) => { finishFirst = resolve; });
+    },
+    { onItemState: (item, state) => states.set(item.sequence, state), onState: (state) => queueStates.push(state) }
+  );
+  for (let sequence = 0; sequence < 3; sequence += 1) queue.enqueue({ text: String(sequence), language: "en" }, segment(sequence));
+  queue.finish();
+  queue.enqueue({ text: "after finish", language: "en" }, segment(3));
+  expect(queue.signal.aborted).toBe(false);
+  resolvers[0]!();
+  await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+  resolvers[1]!();
+  await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+  resolvers[2]!();
+  await vi.waitFor(() => expect(states.get(2)).toBe("ready"));
+  expect(played).toEqual(["0"]);
+  expect(queueStates).not.toContain("idle");
+  finishFirst();
+  await vi.waitFor(() => expect(queueStates.at(-1)).toBe("idle"));
+  expect(played).toEqual(["0", "1", "2"]);
+  expect([...states.values()]).toEqual(["completed", "completed", "completed"]);
+});
+
+it("offline lip-sync decode failure does not fail FIFO playback or the queue", async () => {
+  const { AudioMouthEnvelope } = await import("./lumi-audio.js");
+  const audio = {
+    play: vi.fn(async () => undefined),
+    pause: vi.fn(),
+    load: vi.fn(),
+    remove: vi.fn(),
+    removeAttribute: vi.fn(),
+    onended: null as (() => void) | null,
+    onerror: null,
+    duration: 2,
+    currentTime: 0,
+    paused: false,
+    ended: false,
+    muted: false,
+    volume: 1,
+    readyState: 4
+  };
+  vi.stubGlobal("Audio", vi.fn(() => audio));
+  vi.stubGlobal("URL", { createObjectURL: () => "blob:speech", revokeObjectURL: vi.fn() });
+  vi.stubGlobal("document", { body: { appendChild: vi.fn() } });
+  try {
+    let open = 0;
+    let form = 0.6;
+    const envelope = new AudioMouthEnvelope(
+      {
+        setMouthOpen: (value) => {
+          open = value;
+        },
+        setMouthForm: (value) => {
+          form = value;
+        },
+        resetMouth: () => {
+          open = 0;
+          form = 0;
+        }
+      },
+      undefined,
+      () => ({
+        decodeAudioData: () => Promise.reject(new Error("offline decode failed")),
+        createMediaElementSource: () => {
+          throw new Error("must never route playback");
+        },
+        close: () => {
+          throw new Error("must never close playback");
+        }
+      })
+    );
+    const states: string[] = [];
+    const itemStates: string[] = [];
+    const queue = new SpeechPlaybackQueue(
+      async () => ({ audioBase64: "UklGRg==", mimeType: "audio/wav" }) as never,
+      createBrowserSpeechPlayer(),
+      {
+        onState: (state) => states.push(state),
+        onItemState: (_item, state) => itemStates.push(state),
+        onPlaybackEvent: (event) => {
+          if (event.type === "audioElementAttached") envelope.attach(event.audio);
+          if (event.type === "playbackStarted") envelope.startPlayback(event.audio);
+          if (event.type === "playbackEnded" || event.type === "playbackError") envelope.stop();
+          if (event.type === "audioElementDetached") envelope.detach();
+        }
+      }
+    );
+    queue.enqueue({ text: "one", language: "en" }, segment(0));
+    queue.enqueue({ text: "two", language: "en" }, segment(1));
+    queue.finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audio.play).toHaveBeenCalledTimes(1);
+    audio.currentTime = 2;
+    audio.onended?.();
+    await vi.waitFor(() => expect(audio.play).toHaveBeenCalledTimes(2));
+    audio.currentTime = 2;
+    audio.onended?.();
+    await vi.waitFor(() => expect(states.at(-1)).toBe("idle"));
+    expect(itemStates.filter((state) => state === "completed")).toHaveLength(2);
+    expect(itemStates).not.toContain("failed");
+    expect(open).toBe(0);
+    expect(form).toBe(0.6);
+    envelope.dispose();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("does not release media resources or resolve until natural ended", async () => {
+  const audio = {
+    play: vi.fn(async () => undefined), pause: vi.fn(), load: vi.fn(), remove: vi.fn(),
+    removeAttribute: vi.fn(), onended: null as (() => void) | null, onerror: null,
+    duration: 4, currentTime: 0
+  };
+  const revoke = vi.fn();
+  vi.stubGlobal("Audio", vi.fn(() => audio));
+  vi.stubGlobal("URL", { createObjectURL: () => "blob:complete", revokeObjectURL: revoke });
+  try {
+    const events: string[] = [];
+    let resolved = false;
+    const promise = createBrowserSpeechPlayer()({ audioBase64: "UklGRg==", mimeType: "audio/wav" } as never, new AbortController().signal,
+      { sequence: 0, segment: segment(0), emit: (e) => events.push(e.type) }).then(() => { resolved = true; });
+    await Promise.resolve();
+    expect(events).toEqual(["audioElementAttached", "playbackStarted"]);
+    expect(resolved).toBe(false); expect(revoke).not.toHaveBeenCalled();
+    expect(audio.removeAttribute).not.toHaveBeenCalled(); expect(audio.load).not.toHaveBeenCalled();
+    audio.currentTime = 4; audio.onended!(); await promise;
+    expect(events).toEqual(["audioElementAttached", "playbackStarted", "playbackEnded", "audioElementDetached"]);
+    expect(revoke).toHaveBeenCalledTimes(1); expect(audio.load).toHaveBeenCalledTimes(1);
+  } finally { vi.unstubAllGlobals(); }
+});

@@ -55,7 +55,8 @@ describe("SpeechSegmenter", () => {
   it("emits Chinese, English and Japanese sentences in arrival order", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
     expect(segmenter.push("你好。Hello ")).toEqual(["你好。"]);
-    expect(segmenter.push("world! こんにちは！")).toEqual(["Hello world!", "こんにちは！"]);
+    expect(segmenter.push("world! こんにちは！")).toEqual(["Hello world!"]);
+    expect(segmenter.flush("completed")).toEqual(["こんにちは！"]);
   });
 
   it("flushes a completed tail but does not force a visibly incomplete cancellation tail", () => {
@@ -70,7 +71,7 @@ describe("SpeechSegmenter", () => {
 
   it("keeps Unicode punctuation but strips emoji before synthesis", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
-    expect(segmenter.push("A🙂。B\nC！")).toEqual(["A。", "B", "C！"]);
+    expect([...segmenter.push("A🙂。B\nC！"), ...segmenter.flush("completed")]).toEqual(["A。", "B", "C！"]);
   });
 
   it("does not insert spaces between CJK deltas", () => {
@@ -85,7 +86,7 @@ describe("SpeechSegmenter", () => {
     const emitted: string[] = [];
     emitted.push(...segmenter.push("こんにちは。今日は"));
     expect(emitted).toEqual(["こんにちは。"]);
-    emitted.push(...segmenter.push("いい天気ですね。元気ですか？"));
+    emitted.push(...segmenter.push("いい天気ですね。元気ですか？"), ...segmenter.flush("completed"));
     expect(emitted).toEqual(["こんにちは。", "今日はいい天気ですね。", "元気ですか？"]);
     expect(segmenter.flush("completed")).toEqual([]);
   });
@@ -93,7 +94,8 @@ describe("SpeechSegmenter", () => {
   it("combines multiple deltas into a single sentence before emitting", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
     expect(segmenter.push("今日は")).toEqual([]);
-    expect(segmenter.push("いい天気ですね。")).toEqual(["今日はいい天気ですね。"]);
+    expect(segmenter.push("いい天気ですね。")).toEqual([]);
+    expect(segmenter.flush("completed")).toEqual(["今日はいい天気ですね。"]);
   });
 
   it("flushes the completed tail exactly once", () => {
@@ -134,6 +136,7 @@ describe("SpeechSegmenter", () => {
     const emitted = segmenter.push(
       "Hello.\nThe weather is lovely today.\nWhat would you like to do?"
     );
+    emitted.push(...segmenter.flush("completed"));
     expect(emitted).toEqual([
       "Hello.",
       "The weather is lovely today.",
@@ -164,6 +167,7 @@ describe("SpeechSegmenter", () => {
     const segments = segmenter.push(
       "- First, we can check the current task.\n- Second, we can review the recent changes.\n- Third, we can decide what to work on next."
     );
+    segments.push(...segmenter.flush("completed"));
     expect(segments).toEqual([
       "First, we can check the current task.",
       "Second, we can review the recent changes.",
@@ -186,7 +190,7 @@ describe("SpeechSegmenter", () => {
   it("normalizes CRLF, CR, and blank lines into single-line segments", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
     expect(
-      segmenter.push("Hello.\r\n\r\nThis is the second paragraph.\rThis is the final line.")
+      [...segmenter.push("Hello.\r\n\r\nThis is the second paragraph.\rThis is the final line."), ...segmenter.flush("completed")]
     ).toEqual(["Hello.", "This is the second paragraph.", "This is the final line."]);
   });
 
@@ -218,7 +222,7 @@ describe("SpeechSegmenter", () => {
     emitted.push(...segmenter.flush("completed"));
     expect(emitted).toHaveLength(3);
     expect(emitted[0]).toBe("こんにちは！");
-    expect(emitted[1]).toContain("なんと 9 回目のこんにちはですね。");
+    expect(emitted[1]).toContain("なんと9回目の「こんにちは」ですね。");
     expect(emitted[2]).toContain("しかもさっき自己紹介をお願いしてくれたのに");
   });
 
@@ -281,14 +285,14 @@ describe("SpeechSegmenter", () => {
     emitted.push(...segmenter.flush("completed"));
     expect(emitted).toEqual([
       "こんにちは！",
-      "なんと 9 回目のこんにちはですね。",
-      "しかもさっき自己紹介をお願いしてくれたのに、 またこの挨拶に戻ってきました"
+      "なんと9回目の「こんにちは」ですね。",
+      "しかもさっき自己紹介をお願いしてくれたのに、またこの挨拶に戻ってきました"
     ]);
   });
 
   it("normalizes CRLF/CR, preserves blank-line boundaries, and drops empty tails", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
-    expect(segmenter.push("こんにちは。\r\n\r\n今日はいい天気ですね。\r")).toEqual([
+    expect([...segmenter.push("こんにちは。\r\n\r\n今日はいい天気ですね。\r"), ...segmenter.flush("completed")]).toEqual([
       "こんにちは。",
       "今日はいい天気ですね。"
     ]);
@@ -300,7 +304,7 @@ describe("SpeechSegmenter", () => {
   it("splits markdown lists into bounded, speakable segments", () => {
     const segmenter = new SpeechSegmenter({ minChars: 2 });
     const segments = segmenter.push("- 一つ目の話です。\n- 二つ目の話です。\n- 三つ目の話です。");
-    expect(segments).toEqual(["一つ目の話です。", "二つ目の話です。", "三つ目の話です。"]);
+    expect([...segments, ...segmenter.flush("completed")]).toEqual(["一つ目の話です。", "二つ目の話です。", "三つ目の話です。"]);
     expect(segmenter.flush("completed")).toEqual([]);
   });
 
@@ -413,8 +417,8 @@ describe("SpeechSegmenter queue-aware release policy", () => {
     ]);
     expect(releases.map((r) => r.reason)).toEqual(["FIRST_STRONG"]);
     // The soft-boundary tail is held until a strong boundary arrives.
-    expect(segmenter.push("还没有到句号。")).toEqual([
-      "这个方向其实可以继续做，但是当前最重要的问题是， 还没有到句号。"
+    expect([...segmenter.push("还没有到句号。"), ...segmenter.flush("completed")]).toEqual([
+      "这个方向其实可以继续做，但是当前最重要的问题是，还没有到句号。"
     ]);
   });
 
@@ -456,10 +460,10 @@ describe("SpeechSegmenter queue-aware release policy", () => {
     // Playback of segment 0 ended and nothing is synthesizing: the recent
     // soft boundary becomes an acceptable cut.
     expect(segmenter.push("，到目前为止仍然没有句号出现")).toEqual([
-      "后面这段话只有逗号，还没有句号 ，"
+      "后面这段话只有逗号，还没有句号，"
     ]);
     expect(releases[1]).toEqual({
-      text: "后面这段话只有逗号，还没有句号 ，",
+      text: "后面这段话只有逗号，还没有句号，",
       reason: "STARVING_SOFT_BOUNDARY"
     });
   });
@@ -476,19 +480,20 @@ describe("SpeechSegmenter queue-aware release policy", () => {
 
   it("merges an absurdly tiny CJK first fragment only when the next boundary is already there", () => {
     const { segmenter, releases } = makeSegmenter({ playing: false, synthesizing: false, playbackEnded: 0 });
-    expect(segmenter.push("嗯。对。今天我们继续聊正式的话题。")).toEqual([
+    expect(segmenter.push("嗯。对。今天我们继续聊正式的话题。后续")).toEqual([
       "嗯。对。今天我们继续聊正式的话题。"
     ]);
     expect(releases[0]?.reason).toBe("FIRST_MERGED");
 
     const immediate = makeSegmenter({ playing: false, synthesizing: false, playbackEnded: 0 });
-    expect(immediate.segmenter.push("嗯。")).toEqual(["嗯。"]);
+    expect(immediate.segmenter.push("嗯。")).toEqual([]);
+    expect(immediate.segmenter.push("继续")).toEqual(["嗯。"]);
     expect(immediate.releases[0]?.reason).toBe("FIRST_STRONG");
   });
 
   it("does not merge tiny Latin openers (existing per-sentence contract)", () => {
     const { segmenter } = makeSegmenter({ playing: false, synthesizing: false, playbackEnded: 0 });
-    expect(segmenter.push("A。B。")).toEqual(["A。", "B。"]);
+    expect([...segmenter.push("A。B。"), ...segmenter.flush("completed")]).toEqual(["A。", "B。"]);
   });
 
   it("never cuts a numeric group like 1,000 at a starving soft boundary", () => {
@@ -501,8 +506,8 @@ describe("SpeechSegmenter queue-aware release policy", () => {
         state.playbackEnded = releases.length;
       }
     });
-    expect(segmenter.push("开头的句子。")).toEqual(["开头的句子。"]);
-    expect(segmenter.push("数量恰好是1,000件但是没有别的标点")).toEqual([]);
+    expect(segmenter.push("开头的句子。")).toEqual([]);
+    expect(segmenter.push("数量恰好是1,000件但是没有别的标点")).toEqual(["开头的句子。"]);
     expect(segmenter.flush("completed").length).toBe(1);
     const emitted = releases.map((r) => r.text).join("");
     expect(emitted).toContain("1,000");
@@ -576,9 +581,9 @@ describe("SpeechSegmenter queue-aware release policy", () => {
         state.playbackEnded = releases.length;
       }
     });
-    expect(segmenter.push("完整的第一句。")).toEqual(["完整的第一句。"]);
+    expect(segmenter.push("完整的第一句。")).toEqual([]);
     // Starving but the tail has no soft boundary either: it can only be held.
-    expect(segmenter.push("被取消的残尾没有任何标点")).toEqual([]);
+    expect(segmenter.push("被取消的残尾没有任何标点")).toEqual(["完整的第一句。"]);
     expect(segmenter.flush("cancelled")).toEqual([]);
     expect(segmenter.flush("completed")).toEqual([]);
     expect(releases).toHaveLength(1);
@@ -648,7 +653,7 @@ describe("SpeechSegmenter punctuation conservation", () => {
     // The starving cut lands on the most recent comma; the rest stays pending
     // and is finally flushed — nothing is lost, including the 、 inside.
     expect(segmenter.push("，继续列举更多种类的水果名称")).toEqual([
-      "列举几种水果，苹果、橘子和梨，都没有句号 ，"
+      "列举几种水果，苹果、橘子和梨，都没有句号，"
     ]);
     segmenter.flush("completed");
     const strip = (value: string) => value.replace(/\s+/g, "");
@@ -676,26 +681,26 @@ describe("SpeechSegmenter standalone punctuation conservation (A9-RV1)", () => {
   };
 
   it("conserves the second half of a —— pair after a starving cut at the first dash", () => {
-    const { push } = makeCounting();
+    const { segmenter, push } = makeCounting();
     const emitted: string[] = [];
     emitted.push(...push("闪电亮起的那一瞬，屋子里的影子"));
     emitted.push(...push("全都跳了起来—"));
     // The starving cut releases the pending text ending with the first dash;
     // the second dash then arrives with empty pending and must survive.
     emitted.push(...push("—"));
-    emitted.push(...push("紧接着黑暗又压下来。"));
+    emitted.push(...push("紧接着黑暗又压下来。"), ...segmenter.flush("completed"));
     const strip = (value: string) => value.replace(/\s+/g, "");
     const source = strip("闪电亮起的那一瞬，屋子里的影子全都跳了起来——紧接着黑暗又压下来。");
     expect(strip(emitted.join(""))).toBe(source);
   });
 
   it("conserves a standalone comma delta arriving right after a release", () => {
-    const { push } = makeCounting();
+    const { segmenter, push } = makeCounting();
     const emitted: string[] = [];
     emitted.push(...push("第一句话完整。"));
     emitted.push(...push("，"));
     emitted.push(...push("后续还有内容没有句号"));
-    emitted.push(...push("。"));
+    emitted.push(...push("。"), ...segmenter.flush("completed"));
     const strip = (value: string) => value.replace(/\s+/g, "");
     expect(strip(emitted.join(""))).toBe(strip("第一句话完整。，后续还有内容没有句号。"));
   });
@@ -795,7 +800,7 @@ describe("post-GLM conservation audit", () => {
     const state = { playing: false, synthesizing: false, playbackEnded: 1 };
     const segmenter = new SpeechSegmenter({ pipeline: () => state });
     segmenter.push("第一句话完整。");
-    expect(segmenter.push("第二句话完整。后面这段还没说完，继续")).toEqual(["第二句话完整。"]);
+    expect(segmenter.push("第二句话完整。后面这段还没说完，继续")).toEqual(["第一句话完整。", "第二句话完整。"]);
   });
 });
 
@@ -832,5 +837,5 @@ it("drops cancelled text and a held surrogate before the next turn", () => {
   expect(segmenter.flush("cancelled")).toEqual([]);
   expect(segmenter.flush("completed")).toEqual([]);
   segmenter.reset();
-  expect(segmenter.push("新的回复完整。")).toEqual(["新的回复完整。"]);
+  expect([...segmenter.push("新的回复完整。"), ...segmenter.flush("completed")]).toEqual(["新的回复完整。"]);
 });

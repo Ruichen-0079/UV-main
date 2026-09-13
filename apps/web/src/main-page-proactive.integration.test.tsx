@@ -424,13 +424,17 @@ it("releases a soft boundary after current-turn playback ends and rejects old fe
     } as never));
     const speaks = () => bus.posted.filter((message: any) => message.kind === "speak") as Array<{ text: string }>;
     await delta("第一句话完整。");
-    expect(speaks()).toHaveLength(1);
+    // Terminal punctuation is held for one textual lookahead so a later
+    // punctuation-only delta can still join the same TTS request.
+    expect(speaks()).toHaveLength(0);
+    await delta("接下来");
+    expect(speaks().map(message => message.text)).toEqual(["第一句话完整。"]);
     await act(async () => {
       bus.emit({ kind: "speech-status", requestId: turn.requestId, state: "playing" });
       bus.emit({ kind: "playback-status", requestId: turn.requestId, segmentSequence: 0, state: "started" });
       bus.emit({ kind: "playback-status", requestId: "old-turn", segmentSequence: 0, state: "ended" });
     });
-    await delta("接下来这段话还在继续，");
+    await delta("这段话还在继续，");
     expect(speaks()).toHaveLength(1);
     await act(async () => bus.emit({
       kind: "playback-status", requestId: turn.requestId, segmentSequence: 0, state: "ended"

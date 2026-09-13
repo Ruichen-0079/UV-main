@@ -328,7 +328,9 @@ export function ChatPage(): JSX.Element {
               );
               setVoicePlaybackStatus(state);
               applyPresenceEvent({ type: "queue", epoch: generation, state });
-              if (state === "idle" || state === "stopped" || state === "error") {
+              // An item failure does not terminate the queue. Retain ownership
+              // so subsequent deltas, playback events and cancellation reach it.
+              if (state === "idle" || state === "stopped") {
                 speechSessionRef.current = null;
               }
             }
